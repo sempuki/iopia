@@ -1,0 +1,3 @@
+common --cxxopt=-std=c++23
+build --experimental_ui_max_stdouterr_bytes=-1
+build --jobs=24
