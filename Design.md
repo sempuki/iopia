@@ -1,20 +1,32 @@
 # iopia design
 
-iopia gives Linux's io_uring two C++ front-ends, C++20 coroutines and senders
-and receivers, both built on one ring and one completion protocol.
+iopia gives Linux's io_uring two C++ front-ends, coroutines and senders and
+receivers, both modeled on the C++ standard's designs and built on one ring
+and one completion protocol. On top of them, iopia builds a gateway that moves
+messages between local publish-subscribe systems, such as iceoryx2, and the
+network.
 
 This document records the architecture, the decisions behind it, and the
 roadmap. Update it when a decision changes.
 
 ## Goals
 
-In priority order:
+The library comes first, in priority order:
 
 1. Architectural simplicity.
 2. Two front-ends that share one core, so neither is a port of the other.
 3. No cost over calling liburing directly, beyond what a front-end needs.
+4. Front-ends modeled on the standard's designs, C++20 coroutines and C++26's
+   `std::execution`, so building them teaches how the standard works.
 
-When goals conflict, the higher one wins.
+The gateway is the library's first real user:
+
+5. A gateway that adds as little latency and as few copies as each transport
+   allows, and runs a whole data path on one thread's ring.
+
+When goals conflict, the higher one wins. The gateway doesn't bend the
+library; if it needs something the library lacks, the library gains it as a
+general feature.
 
 **You pay only for what you use.** A program that uses only coroutines compiles
 no sender code, and the reverse. Features such as cancellation, linked
@@ -30,6 +42,16 @@ We use liburing for the system calls and the ring's memory layout. The layers
 above it (the ring wrapper, the completion protocol, the event loop and both
 front-ends) are ours, because their design is the point of the project.
 
+**iopia is a way to learn the standard.** We write our own task type, sender
+and receiver concepts, and algorithms instead of taking them from a library
+such as stdexec. They follow the standard's names and shapes where that
+teaches something, and depart from it where that keeps iopia simpler. Strict
+conformance isn't a goal. If writing a piece ourselves stops teaching
+anything, we can revisit taking it from a library.
+
+The gateway uses iceoryx2 through its C++ binding. It starts after the
+library's front-ends are done (roadmap step 8).
+
 ## Conventions
 
 iopia follows the conventions in simon's
@@ -40,7 +62,9 @@ and the rest.
 
 **Code lives in the `iopia` package and the `iopia` namespace.** Headers are
 included from the repository root (`#include "iopia/ring.hpp"`), and
-implementation details live in `iopia::internal`.
+implementation details live in `iopia::internal`. The gateway lives in the
+`gateway` package and the `iopia::gateway` namespace, so the library never
+depends on iceoryx2.
 
 **C symbols are written with the global namespace qualifier,**
 `::io_uring_get_sqe(...)` and `::io_uring_sqe*`, so a reader can tell
@@ -71,7 +95,10 @@ an error, so `Ring::make(...)` returns `std::expected<Ring, lib::Status>`.
 ## Architecture
 
 ```
-   coroutines             senders and receivers
+                  gateway (package gateway)
+           iceoryx2 ports <-> network sockets
+           /                              \
+   coroutines                    std::execution
   (Task<T>, co_await)    (scheduler, sender, operation state)
            \                     /
             \                   /
@@ -81,6 +108,9 @@ an error, so `Ring::make(...)` returns `std::expected<Ring, lib::Status>`.
                       |
                    liburing
 ```
+
+The gateway may use either front-end. It is written against their public
+interfaces, as any user's code would be.
 
 ### Ring
 
@@ -235,17 +265,86 @@ completion is copied and returned to the kernel one at a time.
 awaitable. The awaitable prepares its submission in `await_suspend`, when the
 coroutine's handle is known, and the completion resumes the coroutine.
 
+The coroutine front-end uses only `<coroutine>`, so a program that uses it
+compiles no sender code.
+
 ### Sender front-end
 
-A scheduler's `schedule()` returns a sender, and each io_uring operation is a
-sender. The operation state that `connect` returns is the completion
-protocol's operation, so it lives exactly as long as the submission does.
+The sender front-end is iopia's own implementation of C++26's
+`std::execution` design. iopia defines its own `scheduler`, `sender`,
+`receiver` and `operation_state` concepts in the `iopia` namespace, after the
+standard's. A loop's scheduler has a `schedule()` that returns a sender, and
+each io_uring operation is a sender too. The operation state that `connect`
+returns is the completion protocol's operation, so it lives exactly as long
+as the submission does.
+
+iopia writes the algorithms it needs (`then`, `when_all`, `let_value`,
+`sync_wait` and so on) one at a time, as the roadmap reaches them.
+Completions map onto the three channels as follows.
+
+| Completion | Channel |
+|---|---|
+| `res >= 0` | `set_value` with the result |
+| `res == -ECANCELED` after a stop request | `set_stopped` |
+| any other `res < 0` | `set_error` with the `lib::Status` |
 
 ### Threading
 
 A ring belongs to one thread. lib's `Status` keeps its messages in a buffer
 that isn't thread-safe, which is one more reason to keep a ring and its
 completions on one thread until a later step decides otherwise.
+
+### Gateway
+
+The gateway moves messages along three kinds of path.
+
+| Path | From | To |
+|---|---|---|
+| Network to local | a socket | an iceoryx2 publisher |
+| Local to network | an iceoryx2 subscriber | a socket |
+| Local to local | one local system | another, e.g. iceoryx2 and ROS 2 |
+
+The first version connects iceoryx2 with the network. DDS, and with it ROS 2
+on its DDS middlewares, waits for a later decision (see Open questions). ROS 2
+nodes that use `rmw_iceoryx2` already speak iceoryx2, so the gateway reaches
+them without DDS.
+
+**Each path runs on one thread and one ring.** The gateway scales by giving
+each thread its own set of topics, so no message crosses threads on its way
+through. This follows "a ring belongs to one thread", and needs no locks on
+the data path.
+
+**iceoryx2 wakes the ring through a file descriptor.** An iceoryx2 `Listener`
+exposes the file descriptor it waits on. The gateway arms a multishot
+`IORING_OP_POLL_ADD` on it, and when it fires, takes the listener's events with
+`try_wait` and drains the matching subscribers without blocking. iceoryx2's
+data stays in shared memory and never passes through the kernel; only the
+wakeup does.
+
+**Network to local copies once.** The gateway receives into kernel-chosen
+buffers, either zero-copy receive (zcrx, `IORING_OP_RECV_ZC`) where the NIC
+supports it, or provided buffer rings otherwise. It then copies each payload
+into a sample loaned from the iceoryx2 publisher, and returns the receive
+buffer at once.
+
+The receive buffer and the iceoryx2 sample can't be one piece of memory,
+because the kernel chooses which zcrx buffer it fills, and iceoryx2 chooses
+which sample it loans. Publishing offsets into the zcrx area instead would let
+the slowest subscriber hold receive buffers, and once the refill queue runs
+dry the kernel falls back to copying anyway. One copy keeps the NIC's queue
+healthy and makes every local subscriber zero-copy.
+
+**Local to network sends from the sample.** The gateway sends straight from
+the iceoryx2 sample with `IORING_OP_SEND_ZC`, and keeps the sample until the
+send's notification completion says the kernel is done with its memory. If
+iceoryx2's shared memory segment can be registered as a fixed buffer, the
+send uses it (Linux 6.0 for `SEND_ZC`; Linux 7.2 for registered buffers on
+plain `SEND`).
+
+**The library supplies the operations the gateway needs** as general
+features: multishot poll, receive with provided buffers, zero-copy receive and
+send, and registered buffers. The gateway adds only iceoryx2 ports and the
+network protocol between gateways.
 
 ## Decisions
 
@@ -258,13 +357,26 @@ completions on one thread until a later step decides otherwise.
 | The loop calls an operation through a function pointer stored in it. | Operations carry no vtable, and each front-end supplies its own function. A virtual function would make every operation polymorphic. |
 | Callables are caller-owned (`CallableOperation<F>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
 | A loop cancels and drains pending operations when destroyed. | Every callable sees its last completion and is destroyed; nothing leaks with the ring. |
+| iopia writes its own coroutine task, sender concepts and algorithms, modeled on the standard's. | Building them is how we learn the standard, which matters more here than conformance or a shorter list of things to write. This settles the earlier question of our own concepts or stdexec's. |
+| The gateway is a separate package, `gateway`, on the library's public interfaces. | The library never depends on iceoryx2, and the gateway tests the interfaces the way any user would. |
+| The gateway's first version connects iceoryx2 and the network; DDS comes later. | iceoryx2 exposes a file descriptor and shared memory, which fit io_uring directly. DDS brings a choice between writing RTPS and linking a library with threads of its own. |
+| Network to local copies each payload once, into an iceoryx2 sample. | The kernel picks the receive buffer and iceoryx2 picks the sample, so they can't be one. Returning receive buffers at once keeps the NIC from falling back to copying. |
 
 ## Open questions
 
-- **Own sender and receiver concepts, or stdexec?** Our own teach more and keep
-  the dependency list short. stdexec gives its algorithms (`then`,
-  `when_all`, and so on) for free. GCC 16's standard library has no
-  `std::execution` yet. Decide before step 5.
+- **Does `Task<T>` follow `std::execution::task`?** C++26's coroutine task
+  type awaits senders. Modeling `Task<T>` on it would leave iopia one set of
+  operations, as senders, and drop its own awaitables. It would also make
+  coroutine users compile sender code, against "you pay only for what you
+  use". Decide before step 4.
+- **The network protocol between gateways:** a framing of iopia's own over TCP
+  or UDP, or an existing one such as Zenoh's or RTPS. Decide before step 9.
+- **How the gateway speaks DDS:** implement RTPS on io_uring so the ring owns
+  every socket, or link a DDS library such as Cyclone DDS and hand messages
+  between its threads and the ring. Local-to-local paths to DDS wait on this.
+- **Registering iceoryx2's shared memory as a fixed buffer:** whether iceoryx2
+  exposes its segments' addresses and sizes, and whether it remaps them while
+  the gateway runs.
 - **What happens when the submission queue is full:** submit and retry, or
   report an error to the caller.
 - **Cancellation:** how a coroutine and a stop token each map to
@@ -279,7 +391,16 @@ completions on one thread until a later step decides otherwise.
 3. **Event loop.** Batching, a full submission queue, and when `run()` returns.
 4. **Coroutine front-end.** `Task<T>`, and awaitables for nop, read, write and
    timeout.
-5. **Sender front-end.** A scheduler and the same operations as senders.
+5. **Sender front-end.** iopia's sender concepts, a scheduler, the same
+   operations as senders, and the first algorithms (`then`, `sync_wait`).
 6. **Bridges.** Awaiting a sender inside a `Task`, and a `Task` as a sender.
-7. **Further features.** Cancellation, linked timeouts, multishot accept and
-   receive, registered buffers, and waking a loop from another thread.
+7. **Further features.** Cancellation, linked timeouts, multishot accept,
+   receive and poll, provided buffer rings, registered buffers, zero-copy send
+   and receive, and waking a loop from another thread.
+8. **iceoryx2 ports.** Awaiting an iceoryx2 listener through multishot poll,
+   draining subscribers, and publishing loaned samples, in the `gateway`
+   package.
+9. **Network paths.** Network to local and local to network between two
+   gateways, with the protocol chosen in Open questions.
+10. **Local-to-local paths.** Bridging to ROS 2 and DDS, once the DDS question
+    is decided.
