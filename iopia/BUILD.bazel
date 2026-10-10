@@ -7,6 +7,13 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "argument",
+    hdrs = ["argument.hpp"],
+    copts = COPTS,
+    deps = ["@lib//base:core"],
+)
+
+cc_library(
     name = "io_error",
     srcs = ["io_error.cpp"],
     hdrs = ["io_error.hpp"],
@@ -23,6 +30,7 @@ cc_library(
     hdrs = ["ring.hpp"],
     copts = COPTS,
     deps = [
+        ":argument",
         ":io_error",
         "//3rd_party:liburing",
         "@lib//base:core",
@@ -46,6 +54,7 @@ cc_library(
     hdrs = ["loop.hpp"],
     copts = COPTS,
     deps = [
+        ":argument",
         ":io_error",
         ":operation",
         ":ring",

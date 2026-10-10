@@ -29,15 +29,14 @@ struct CountingOperation final : Operation {
   Completion last;
 };
 
-auto make_loop(unsigned entries = 8, unsigned flags = 0) -> Loop {
+auto make_loop(std::uint32_t entries = 8, std::uint32_t flags = 0) -> Loop {
   auto ring = Ring::make(entries, flags);
   REQUIRE(ring);
   return Loop{*std::move(ring)};
 }
 
 // Submits a NOP that completes `operation`.
-auto submit_nop(lib::Depend<Operation> operation, lib::InOut<Loop> loop)
-    -> void {
+auto submit_nop(Depend<Operation> operation, InOut<Loop> loop) -> void {
   ::io_uring_sqe* submission = loop->maybe_submission(operation);
   REQUIRE(submission);
   ::io_uring_prep_nop(submission);
@@ -77,7 +76,7 @@ static_assert(
     !std::is_convertible_v<MayThrowComplete, Operation::CompleteFunction>);
 
 // Runs `loop` until nothing is pending.
-auto run_until_idle(lib::InOut<Loop> loop) -> void {
+auto run_until_idle(InOut<Loop> loop) -> void {
   while (loop->pending() > 0) {
     REQUIRE(loop->run_once());
   }
@@ -91,8 +90,8 @@ TEST_CASE("Loop") {
     Loop loop = make_loop();
     CountingOperation first;
     CountingOperation second;
-    submit_nop(lib::Depend(first), lib::InOut(loop));
-    submit_nop(lib::Depend(second), lib::InOut(loop));
+    submit_nop(Depend(first), InOut(loop));
+    submit_nop(Depend(second), InOut(loop));
 
     // Under Test.
     auto dispatched = loop.run_once();
@@ -111,11 +110,11 @@ TEST_CASE("Loop") {
     // Preconditions.
     // An operation that submits itself once more from its own handler.
     struct RepeatingOperation final : Operation {
-      explicit RepeatingOperation(lib::Depend<Loop> loop) : loop_{loop.get()} {
+      explicit RepeatingOperation(Depend<Loop> loop) : loop_{loop.get()} {
         complete = [](Operation& operation, Completion) noexcept {
           auto& self = static_cast<RepeatingOperation&>(operation);
           if (++self.calls == 1) {
-            submit_nop(lib::Depend(self), lib::InOut(*self.loop_));
+            submit_nop(Depend(self), InOut(*self.loop_));
           }
         };
       }
@@ -124,8 +123,8 @@ TEST_CASE("Loop") {
       int calls = 0;
     };
     Loop loop = make_loop();
-    RepeatingOperation operation{lib::Depend(loop)};
-    submit_nop(lib::Depend(operation), lib::InOut(loop));
+    RepeatingOperation operation{Depend(loop)};
+    submit_nop(Depend(operation), InOut(loop));
 
     // Under Test.
     auto first = loop.run_once();
@@ -158,8 +157,7 @@ TEST_CASE("Loop") {
 
     // Under Test.
     // Postconditions.
-    CHECK_THROWS_AS(loop.maybe_submission(lib::Depend(operation)),
-                    std::logic_error);
+    CHECK_THROWS_AS(loop.maybe_submission(Depend(operation)), std::logic_error);
   }
 
   SECTION("ShouldCallCallerOwnedHandlerGivenNop") {
@@ -169,7 +167,7 @@ TEST_CASE("Loop") {
     HandlerOperation operation{[&](Completion completion) noexcept {
       completions.push_back(completion);
     }};
-    submit_nop(lib::Depend(operation), lib::InOut(loop));
+    submit_nop(Depend(operation), InOut(loop));
 
     // Under Test.
     auto dispatched = loop.run_once();
@@ -228,7 +226,7 @@ TEST_CASE("Loop") {
     // Postconditions.
     CHECK(queued);
     CHECK(loop.pending() == 2u);
-    run_until_idle(lib::InOut(loop));
+    run_until_idle(InOut(loop));
     CHECK(calls == 2);
   }
 
@@ -260,7 +258,7 @@ TEST_CASE("Loop") {
 
     // Postconditions.
     REQUIRE(dispatched);
-    CHECK(*dispatched == unsigned{COUNT});
+    CHECK(*dispatched == std::uint32_t{COUNT});
     CHECK(calls == COUNT);
     CHECK(loop.pending() == 0u);
   }
@@ -330,7 +328,7 @@ TEST_CASE("Loop") {
         }));
 
     // Under Test.
-    run_until_idle(lib::InOut(loop));
+    run_until_idle(InOut(loop));
 
     // Postconditions.
     REQUIRE(completions.size() == 3u);

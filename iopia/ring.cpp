@@ -10,7 +10,7 @@ auto internal::IoUringDelete::operator()(::io_uring* ring) const noexcept
   delete ring;
 }
 
-auto Ring::make(unsigned entries, unsigned flags)
+auto Ring::make(std::uint32_t entries, std::uint32_t flags)
     -> std::expected<Ring, lib::Status> {
   auto ring = std::make_unique<::io_uring>();
   if (int result = ::io_uring_queue_init(entries, ring.get(), flags);
