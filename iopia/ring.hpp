@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 
 #include "base/core.hpp"
 #include "base/status.hpp"
@@ -63,6 +64,29 @@ class Ring final {
     return static_cast<unsigned>(submitted);
   }
 
+  // Hands every prepared entry to the kernel and waits until at least `count`
+  // completions are ready, in one system call. Returns how many entries the
+  // kernel took.
+  auto submit_and_wait(unsigned count) -> std::expected<unsigned, lib::Status> {
+    CHECK_PRECONDITION(ring_);
+    int submitted = ::io_uring_submit_and_wait(ring_.get(), count);
+    if (submitted < 0) [[unlikely]] {
+      return Failure{raise_io_error(submitted, "io_uring_submit_and_wait")};
+    }
+    return static_cast<unsigned>(submitted);
+  }
+
+  // A copy of the next ready completion, or none if none is ready. It never
+  // waits.
+  auto maybe_completion() -> std::optional<Completion> {
+    CHECK_PRECONDITION(ring_);
+    ::io_uring_cqe* entry = nullptr;
+    if (::io_uring_peek_cqe(ring_.get(), &entry) != 0) {
+      return std::nullopt;
+    }
+    return take(entry);
+  }
+
   // Waits for the next completion and returns a copy of it.
   auto wait() -> std::expected<Completion, lib::Status> {
     CHECK_PRECONDITION(ring_);
@@ -71,6 +95,14 @@ class Ring final {
         [[unlikely]] {
       return Failure{raise_io_error(result, "io_uring_wait_cqe")};
     }
+    return take(entry);
+  }
+
+ private:
+  explicit Ring(::io_uring* ring) : ring_{ring} {}
+
+  // Copies `entry` and returns it to the kernel.
+  auto take(::io_uring_cqe* entry) -> Completion {
     Completion completion{
         .user_data = entry->user_data,
         .flags = entry->flags,
@@ -79,9 +111,6 @@ class Ring final {
     ::io_uring_cqe_seen(ring_.get(), entry);
     return completion;
   }
-
- private:
-  explicit Ring(::io_uring* ring) : ring_{ring} {}
 
   std::unique_ptr<::io_uring, internal::ExitRing> ring_;
 };

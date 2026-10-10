@@ -116,17 +116,118 @@ completion queue.
 
 ### Completion protocol
 
-Each submission's `user_data` points at an operation that outlives it. When
-the completion arrives, the event loop calls the operation with the
-completion's `res` and `flags`. The two front-ends differ only in what an
-operation does then. A coroutine's operation resumes its `coroutine_handle`,
-and a sender's operation state calls its receiver.
+Each submission's `user_data` points at an operation. When a completion
+arrives, the event loop calls the operation with the completion's `res` and
+`flags`, through a function pointer the operation stores. The two front-ends
+differ only in what an operation does then. A coroutine's operation resumes
+its `coroutine_handle`, and a sender's operation state calls its receiver.
+
+**An operation must stay alive, at the same address, until its last
+completion has been dispatched.** That is later than its submission. Most
+operations complete once. A multishot operation (multishot accept, receive or
+timeout) completes several times, and every completion but the last has
+`IORING_CQE_F_MORE` set in its flags.
+
+`Operation` (`iopia/operation.hpp`) holds only that function pointer,
+`complete`, which takes the operation and its `Completion`. An operation type
+derives from `Operation`, sets `complete` to a function that casts the
+`Operation&` back to its own type, and adds whatever state it needs.
+
+```cpp
+struct CountingOperation final : Operation {
+  CountingOperation() {
+    complete = [](Operation& operation, Completion) {
+      ++static_cast<CountingOperation&>(operation).calls;
+    };
+  }
+  int calls = 0;
+};
+```
+
+#### Callables
+
+A lambda or other callable becomes an operation in one of two ways, which
+differ in who owns it while the kernel holds its address.
+
+**The caller owns it.** `CallableOperation<F>` stores the callable `F` by
+value and calls it with each `Completion`. It lives wherever the caller puts
+it (on the stack, in a member, in a coroutine frame or a sender's operation
+state), and the caller keeps it alive until its last completion. It allocates
+nothing, takes callables of any size, and makes one indirect call per
+completion. It can be neither copied nor moved, so it can't leave the address
+the kernel holds. Both front-ends build on this kind.
+
+```cpp
+CallableOperation operation{[&](Completion completion) { ... }};
+::io_uring_prep_nop(loop.maybe_submission(lib::Depend(operation)));
+```
+
+**The loop owns it.** `loop.queue(prepare, callback)` takes a function that
+prepares the submission queue entry and a callable to call with each
+completion. The loop stores the callable in a node of its own, a
+`CallbackOperation` holding a `std::move_only_function<void(Completion)>`, and
+returns the node to a free list after the last completion. The caller has
+nothing to keep alive.
+
+```cpp
+bool queued = loop.queue(
+    [](::io_uring_sqe* submission) { ::io_uring_prep_nop(submission); },
+    [](Completion completion) { ... });
+```
+
+| | Caller-owned | Loop-owned |
+|---|---|---|
+| Who keeps it alive | the caller | the loop |
+| Allocation | none | none once the free list is warm, for captures of 24 bytes or less |
+| Callable size | any | any; larger captures allocate inside `std::move_only_function` |
+| Indirect calls per completion | one | two (`complete`, then the `std::move_only_function`) |
+| Per-operation storage | the callable | the node: `Operation` plus a 40-byte `std::move_only_function` |
+
+The 24 and 40 bytes are libstdc++'s, measured with GCC 16 and Clang 22.
+`std::move_only_function` gives the loop-owned kind its small-buffer storage,
+moves and destruction, so iopia doesn't write them.
+
+**Exceptions from a callback propagate out of `run_once()`.** The entry was
+already returned to the kernel, and the completions still waiting stay in the
+completion queue for the next `run_once()`. A loop-owned node goes back to the
+free list before its last callback runs, by moving the callable out first, so
+a throw loses nothing. That also lets a callback queue a new operation that
+reuses its node.
 
 ### Event loop
 
-The loop submits what is queued, reaps completions and dispatches each one.
-It decides when to wait in the kernel, what happens when the submission queue
-is full, and when `run()` returns.
+`Loop` (`iopia/loop.hpp`) owns a `Ring` and counts the operations it has
+handed submission queue entries to whose last completion hasn't arrived. It
+can be neither copied nor moved, because its loop-owned nodes and the
+operations that resubmit through it hold its address.
+
+- `maybe_submission(Depend(operation))` returns the next free submission
+  queue entry with its `user_data` set to the operation's address, or null
+  when the queue is full. `Depend` marks that the loop keeps a reference that
+  can dangle.
+- `queue(prepare, callback)` does the same for a loop-owned callable, and
+  returns false when the queue is full.
+- `run_once()` submits what is prepared and waits for at least one completion,
+  in one system call (`io_uring_submit_and_wait`). Then it calls back the
+  operation of every completion that is ready, and returns how many it called.
+  With nothing pending it returns 0 without waiting. A callback may submit
+  more operations; they go out on the next `run_once()`.
+- A completion whose `user_data` is 0 has no operation, and fails a contract
+  check.
+
+**Destroying a loop cancels and drains what is pending.** Tearing down the
+ring with operations pending would mean their completions are never reaped,
+so loop-owned callables would never be destroyed. The destructor submits one
+`io_uring_prep_cancel` with `IORING_ASYNC_CANCEL_ANY` (Linux 5.19) and runs
+until nothing is pending, so every operation sees its last completion, the
+cancelled ones with `-ECANCELED`. A caller-owned operation that is still
+pending must therefore outlive the loop. A callback that throws during the
+drain terminates the program, since destructors don't throw.
+
+Step 3 decides the rest: when `run()` returns, what happens when the
+submission queue is full, and whether to batch reaping with
+`io_uring_peek_batch_cqe` and a single `io_uring_cq_advance`. Today each
+completion is copied and returned to the kernel one at a time.
 
 ### Coroutine front-end
 
@@ -154,6 +255,9 @@ completions on one thread until a later step decides otherwise.
 | liburing 2.15 comes from the Bazel Central Registry. | Every dependency comes from the registry, as in simon. The registry's build reads the host's kernel headers once; see `3rd_party/README.md`. |
 | C++26, from lib's `COPTS`. | Shared with simon and volcano. Coroutines need only C++20. |
 | A ring belongs to one thread. | Simplest to start with, and `lib::Status` isn't thread-safe. |
+| The loop calls an operation through a function pointer stored in it. | Operations carry no vtable, and each front-end supplies its own function. A virtual function would make every operation polymorphic. |
+| Callables are caller-owned (`CallableOperation<F>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
+| A loop cancels and drains pending operations when destroyed. | Every callable sees its last completion and is destroyed; nothing leaks with the ring. |
 
 ## Open questions
 
@@ -161,9 +265,6 @@ completions on one thread until a later step decides otherwise.
   the dependency list short. stdexec gives its algorithms (`then`,
   `when_all`, and so on) for free. GCC 16's standard library has no
   `std::execution` yet. Decide before step 5.
-- **How the loop calls an operation:** a function pointer stored in the
-  operation, or a virtual function. A function pointer keeps operations
-  standard-layout and avoids a vtable.
 - **What happens when the submission queue is full:** submit and retry, or
   report an error to the caller.
 - **Cancellation:** how a coroutine and a stop token each map to

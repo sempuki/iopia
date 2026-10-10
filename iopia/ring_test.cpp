@@ -2,6 +2,7 @@
 
 #include "iopia/ring.hpp"
 
+#include <cstdint>
 #include <utility>
 
 #include "base/testing.hpp"
@@ -60,6 +61,43 @@ TEST_CASE("Ring") {
     auto completion = ring.wait();
     REQUIRE(completion);
     CHECK(completion->user_data == 7u);
+  }
+
+  SECTION("ShouldReturnNoCompletionGivenNothingSubmitted") {
+    // Preconditions.
+    auto ring = Ring::make(8);
+    REQUIRE(ring);
+
+    // Under Test.
+    auto completion = ring->maybe_completion();
+
+    // Postconditions.
+    CHECK_FALSE(completion);
+  }
+
+  SECTION("ShouldReadyEveryCompletionGivenSubmitAndWaitForAll") {
+    // Preconditions.
+    auto ring = Ring::make(8);
+    REQUIRE(ring);
+    for (std::uint64_t user_data : {1u, 2u}) {
+      ::io_uring_sqe* submission = ring->maybe_submission();
+      REQUIRE(submission);
+      ::io_uring_prep_nop(submission);
+      ::io_uring_sqe_set_data64(submission, user_data);
+    }
+
+    // Under Test.
+    auto submitted = ring->submit_and_wait(2);
+
+    // Postconditions.
+    REQUIRE(submitted);
+    CHECK(*submitted == 2u);
+    auto first = ring->maybe_completion();
+    auto second = ring->maybe_completion();
+    REQUIRE(first);
+    REQUIRE(second);
+    CHECK(first->user_data + second->user_data == 3u);
+    CHECK_FALSE(ring->maybe_completion());
   }
 
   SECTION("ShouldFailAsInvalidGivenZeroEntries") {
