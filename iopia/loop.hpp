@@ -17,6 +17,7 @@
 
 #include "base/core.hpp"
 #include "base/status.hpp"
+#include "iopia/argument.hpp"
 #include "iopia/operation.hpp"
 #include "iopia/ring.hpp"
 
@@ -34,7 +35,7 @@ namespace internal {
 // The node that holds a handler the loop owns. It goes back to its free list
 // before its handler's last call.
 struct HandlerNode final : Operation {
-  explicit HandlerNode(lib::Depend<std::vector<HandlerNode*>> free);
+  explicit HandlerNode(Depend<std::vector<HandlerNode*>> free);
 
   std::move_only_function<void(Completion) noexcept> handler;
   std::vector<HandlerNode*>* free_ = nullptr;
@@ -69,7 +70,7 @@ class Loop final {
   // `operation`. The caller prepares it with an io_uring_prep_* function. If
   // the queue is full, it submits what the queue holds and tries once more,
   // and returns null if that fails or the queue is still full.
-  auto maybe_submission(lib::Depend<Operation> operation) -> ::io_uring_sqe* {
+  auto maybe_submission(Depend<Operation> operation) -> ::io_uring_sqe* {
     CHECK_PRECONDITION(operation->complete);
     ::io_uring_sqe* submission = ring_.maybe_submission();
     if (!submission && ring_.submit()) [[unlikely]] {
@@ -90,7 +91,7 @@ class Loop final {
   [[nodiscard]] auto queue(PrepareType&& prepare, HandlerType&& handler)
       -> bool {
     internal::HandlerNode& node = acquire_node();
-    ::io_uring_sqe* submission = maybe_submission(lib::Depend(node));
+    ::io_uring_sqe* submission = maybe_submission(Depend(node));
     if (!submission) {
       free_.push_back(&node);
       return false;
@@ -101,16 +102,16 @@ class Loop final {
   }
 
   // Hands every prepared entry to the kernel, and returns how many it took.
-  auto submit() -> std::expected<unsigned, lib::Status> {
+  auto submit() -> std::expected<std::uint32_t, lib::Status> {
     return ring_.submit();
   }
 
   // Submits what is prepared, waits for at least one completion, and calls
   // the operation of every completion that is ready. Returns how many it
   // called, or 0 at once if nothing is pending.
-  auto run_once() -> std::expected<unsigned, lib::Status> {
+  auto run_once() -> std::expected<std::uint32_t, lib::Status> {
     if (pending_ == 0) {
-      return 0u;
+      return std::uint32_t{0};
     }
     RETURN_IF_UNEXPECTED(ring_.submit_and_wait(1));
     return dispatch_ready();
@@ -144,16 +145,16 @@ class Loop final {
   // Copies the ready completions a batch at a time, returns each batch to the
   // kernel, then dispatches it. It stops after a batch that isn't full, so
   // completions that keep arriving can't hold it forever.
-  auto dispatch_ready() -> unsigned {
+  auto dispatch_ready() -> std::uint32_t {
     std::array<Completion, COMPLETION_BATCH> batch;
-    unsigned dispatched = 0;
-    std::size_t taken = 0;
+    std::uint32_t dispatched = 0;
+    std::uint32_t taken = 0;
     do {
-      taken = ring_.take_completions(batch);
+      taken = ring_.take_completions(Out(batch));
       for (Completion completion : std::span{batch}.first(taken)) {
         dispatch(completion);
       }
-      dispatched += static_cast<unsigned>(taken);
+      dispatched += taken;
     } while (taken == batch.size());
     return dispatched;
   }

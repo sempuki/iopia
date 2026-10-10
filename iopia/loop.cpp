@@ -6,7 +6,7 @@
 
 namespace iopia {
 
-internal::HandlerNode::HandlerNode(lib::Depend<std::vector<HandlerNode*>> free)
+internal::HandlerNode::HandlerNode(Depend<std::vector<HandlerNode*>> free)
     : free_{free.get()} {
   complete = [](Operation& operation, Completion completion) noexcept {
     auto& self = static_cast<HandlerNode&>(operation);
@@ -27,8 +27,7 @@ Loop::~Loop() { cancel_and_drain(); }
 
 auto Loop::acquire_node() -> internal::HandlerNode& {
   if (free_.empty()) {
-    nodes_.push_back(
-        std::make_unique<internal::HandlerNode>(lib::Depend(free_)));
+    nodes_.push_back(std::make_unique<internal::HandlerNode>(Depend(free_)));
     return *nodes_.back();
   }
   internal::HandlerNode* node = free_.back();
@@ -39,8 +38,7 @@ auto Loop::acquire_node() -> internal::HandlerNode& {
 auto Loop::run() -> std::expected<void, lib::Status> {
   while (pending_ > 0 && !stopping_) {
     auto dispatched = run_once();
-    if (!dispatched &&
-        dispatched.error().kind() != lib::watch(IoError::INTERRUPTED)) {
+    if (!dispatched && dispatched.error() != lib::watch(IoError::INTERRUPTED)) {
       stopping_ = false;
       return Failure{std::move(dispatched).error()};
     }
@@ -53,7 +51,7 @@ auto Loop::cancel_and_drain() -> void {
   if (pending_ == 0) {
     return;
   }
-  if (::io_uring_sqe* submission = maybe_submission(lib::Depend(cancel_))) {
+  if (::io_uring_sqe* submission = maybe_submission(Depend(cancel_))) {
     ::io_uring_prep_cancel(submission, nullptr,
                            IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_ALL);
   }

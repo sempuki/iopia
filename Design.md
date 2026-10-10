@@ -69,7 +69,20 @@ depends on iceoryx2.
 **C symbols are written with the global namespace qualifier,**
 `::io_uring_get_sqe(...)` and `::io_uring_sqe*`, so a reader can tell
 liburing's C API from iopia's own names. Macros such as `IORING_SETUP_SQPOLL`
-and `EINVAL` can't be qualified and stay as they are.
+and `EINVAL` can't be qualified and stay as they are. Where liburing offers a
+function and a macro for the same job, iopia uses the function, so its name
+can be qualified: `::io_uring_peek_batch_cqe`, not `io_uring_for_each_cqe`.
+
+**`Out`, `InOut` and `Depend` are written without `lib::`.** They are lib's
+parameter vocabulary, and the project has only one of each.
+`iopia/argument.hpp` declares them in the `iopia` namespace, as simon's
+`core/argument.hpp` does.
+
+**Integers have fixed widths:** `std::uint32_t`, not `unsigned`. Sizes and
+indices into containers stay `std::size_t`. liburing's `unsigned` parameters
+take a `std::uint32_t` without a cast, since the two are the same type on
+Linux. A value a C call returns, such as liburing's `int` results, keeps its
+type only until iopia converts it.
 
 **Names avoid abbreviations,** except where they come from the C API:
 `submission`, not `sqe`. `IoError` keeps "io", because it follows io_uring's
@@ -143,9 +156,11 @@ measure the hot calls before deciding to change it.
 the queue is full. Completions come out as copies, so no caller holds a
 pointer into the completion queue. `wait()` and `maybe_completion()` copy one
 completion and return its entry to the kernel at once.
-`take_completions(into)` copies as many ready completions as fit in the span
-`into` and returns their entries together, with one `io_uring_cq_advance`. It
-reads the queue with `io_uring_for_each_cqe` and never enters the kernel.
+`take_completions(Out(batch))` copies as many ready completions as fit in the
+array `batch` and returns their entries together, with one
+`io_uring_cq_advance`. It reads them with `io_uring_peek_batch_cqe`, which
+enters the kernel only when no completion is ready and the kernel is holding
+some back (after an overflow, or with task work waiting).
 
 ### Completion protocol
 
@@ -195,7 +210,7 @@ holds. Both front-ends build on this kind.
 
 ```cpp
 HandlerOperation operation{[&](Completion completion) noexcept { ... }};
-::io_uring_prep_nop(loop.maybe_submission(lib::Depend(operation)));
+::io_uring_prep_nop(loop.maybe_submission(Depend(operation)));
 ```
 
 **The loop owns it.** `loop.queue(prepare, handler)` takes a function that

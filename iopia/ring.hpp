@@ -4,15 +4,16 @@
 
 #include <liburing.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
 #include <optional>
-#include <span>
 
 #include "base/core.hpp"
 #include "base/status.hpp"
+#include "iopia/argument.hpp"
 #include "iopia/io_error.hpp"
 
 // One io_uring, its submission and completion queues, used from one thread.
@@ -47,7 +48,7 @@ class Ring final {
 
   // A ring with at least `entries` submission queue entries. `flags` are
   // liburing's IORING_SETUP_* bits, passed through.
-  static auto make(unsigned entries, unsigned flags = 0)
+  static auto make(std::uint32_t entries, std::uint32_t flags = 0)
       -> std::expected<Ring, lib::Status>;
 
   // The next free submission queue entry, or null if the queue is full. The
@@ -58,25 +59,26 @@ class Ring final {
   }
 
   // Hands every prepared entry to the kernel, and returns how many it took.
-  auto submit() -> std::expected<unsigned, lib::Status> {
+  auto submit() -> std::expected<std::uint32_t, lib::Status> {
     CHECK_PRECONDITION(ring_);
     int submitted = ::io_uring_submit(ring_.get());
     if (submitted < 0) [[unlikely]] {
       return Failure{raise_io_error(submitted, "io_uring_submit")};
     }
-    return static_cast<unsigned>(submitted);
+    return static_cast<std::uint32_t>(submitted);
   }
 
   // Hands every prepared entry to the kernel and waits until at least `count`
   // completions are ready, in one system call. Returns how many entries the
   // kernel took.
-  auto submit_and_wait(unsigned count) -> std::expected<unsigned, lib::Status> {
+  auto submit_and_wait(std::uint32_t count)
+      -> std::expected<std::uint32_t, lib::Status> {
     CHECK_PRECONDITION(ring_);
     int submitted = ::io_uring_submit_and_wait(ring_.get(), count);
     if (submitted < 0) [[unlikely]] {
       return Failure{raise_io_error(submitted, "io_uring_submit_and_wait")};
     }
-    return static_cast<unsigned>(submitted);
+    return static_cast<std::uint32_t>(submitted);
   }
 
   // A copy of the next ready completion, or none if none is ready. It never
@@ -92,20 +94,20 @@ class Ring final {
 
   // Copies as many ready completions as fit into `into`, oldest first, and
   // returns their entries to the kernel together. Returns how many it copied.
-  // It never waits or enters the kernel, so completions the kernel holds back
-  // after an overflow wait for the next submit_and_wait().
-  auto take_completions(std::span<Completion> into) -> std::size_t {
+  // It never waits. It enters the kernel only when no completion is ready and
+  // the kernel is holding some back, after an overflow or with task work
+  // waiting.
+  template <std::size_t Count>
+  auto take_completions(Out<std::array<Completion, Count>> into)
+      -> std::uint32_t {
     CHECK_PRECONDITION(ring_);
-    std::size_t taken = 0;
-    unsigned head = 0;
-    ::io_uring_cqe* entry = nullptr;
-    io_uring_for_each_cqe(ring_.get(), head, entry) {
-      if (taken == into.size()) {
-        break;
-      }
-      into[taken++] = copy(*entry);
+    std::array<::io_uring_cqe*, Count> entries;
+    std::uint32_t taken = ::io_uring_peek_batch_cqe(
+        ring_.get(), entries.data(), static_cast<std::uint32_t>(Count));
+    for (std::uint32_t index = 0; index < taken; ++index) {
+      (*into)[index] = copy(*entries[index]);
     }
-    ::io_uring_cq_advance(ring_.get(), static_cast<unsigned>(taken));
+    ::io_uring_cq_advance(ring_.get(), taken);
     return taken;
   }
 

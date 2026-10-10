@@ -115,7 +115,7 @@ TEST_CASE("Ring") {
     std::array<Completion, 8> into;
 
     // Under Test.
-    std::size_t taken = ring->take_completions(into);
+    std::uint32_t taken = ring->take_completions(Out(into));
 
     // Postconditions.
     REQUIRE(taken == 3u);
@@ -139,9 +139,9 @@ TEST_CASE("Ring") {
     std::array<Completion, 2> into;
 
     // Under Test.
-    std::size_t first = ring->take_completions(into);
+    std::uint32_t first = ring->take_completions(Out(into));
     std::uint64_t first_user_data = into[0].user_data;
-    std::size_t second = ring->take_completions(into);
+    std::uint32_t second = ring->take_completions(Out(into));
 
     // Postconditions.
     CHECK(first == 2u);
@@ -157,7 +157,7 @@ TEST_CASE("Ring") {
     std::array<Completion, 4> into;
 
     // Under Test.
-    std::size_t taken = ring->take_completions(into);
+    std::uint32_t taken = ring->take_completions(Out(into));
 
     // Postconditions.
     CHECK(taken == 0u);
