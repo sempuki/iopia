@@ -1,7 +1,9 @@
 # iopia
 
-C++ front-ends for Linux's io_uring: C++20 coroutines and senders and
-receivers, both built on one ring and one completion protocol.
+C++ front-ends for Linux's io_uring, coroutines and senders and receivers,
+both modeled on the C++ standard's designs and built on one ring and one
+completion protocol. On top of them, a gateway that moves messages between
+local publish-subscribe systems, such as iceoryx2, and the network.
 
 The design, its decisions and the plan are in [Design.md](Design.md).
 
@@ -45,3 +47,8 @@ Restart clangd (`:LspRestart` in Neovim) after the first build.
 |---|---|---|
 | [liburing](https://github.com/axboe/liburing) | The io_uring system calls and ring helpers | MIT or LGPL-2.1 |
 | [Catch2](https://github.com/catchorg/Catch2) | Tests | BSL-1.0 |
+
+## License
+
+iopia is licensed under the GNU General Public License, version 3 only
+(GPL-3.0-only). See [LICENSE](LICENSE).
