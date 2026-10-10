@@ -6,33 +6,32 @@
 
 namespace iopia {
 
-internal::CallbackOperation::CallbackOperation(
-    lib::Depend<std::vector<CallbackOperation*>> free)
+internal::HandlerNode::HandlerNode(lib::Depend<std::vector<HandlerNode*>> free)
     : free_{free.get()} {
-  complete = [](Operation& operation, Completion completion) {
-    auto& self = static_cast<CallbackOperation&>(operation);
+  complete = [](Operation& operation, Completion completion) noexcept {
+    auto& self = static_cast<HandlerNode&>(operation);
     if (completion.flags & IORING_CQE_F_MORE) {
-      self.callback(completion);
+      self.handler(completion);
       return;
     }
-    // The node is free before the callback runs, so a throw loses nothing and
-    // the callback may queue an operation that reuses it.
-    auto callback = std::move(self.callback);
-    self.callback = nullptr;
+    // The node is free before the handler's last call, so the handler may
+    // queue an operation that reuses it.
+    auto handler = std::move(self.handler);
+    self.handler = nullptr;
     self.free_->push_back(&self);
-    callback(completion);
+    handler(completion);
   };
 }
 
 Loop::~Loop() { cancel_and_drain(); }
 
-auto Loop::acquire_node() -> internal::CallbackOperation& {
+auto Loop::acquire_node() -> internal::HandlerNode& {
   if (free_.empty()) {
     nodes_.push_back(
-        std::make_unique<internal::CallbackOperation>(lib::Depend(free_)));
+        std::make_unique<internal::HandlerNode>(lib::Depend(free_)));
     return *nodes_.back();
   }
-  internal::CallbackOperation* node = free_.back();
+  internal::HandlerNode* node = free_.back();
   free_.pop_back();
   return *node;
 }

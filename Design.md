@@ -160,13 +160,13 @@ timeout) completes several times, and every completion but the last has
 
 `Operation` (`iopia/operation.hpp`) holds only that function pointer,
 `complete`, which takes the operation and its `Completion`. An operation type
-derives from `Operation`, sets `complete` to a function that casts the
-`Operation&` back to its own type, and adds whatever state it needs.
+derives from `Operation`, sets `complete` to a `noexcept` function that casts
+the `Operation&` back to its own type, and adds whatever state it needs.
 
 ```cpp
 struct CountingOperation final : Operation {
   CountingOperation() {
-    complete = [](Operation& operation, Completion) {
+    complete = [](Operation& operation, Completion) noexcept {
       ++static_cast<CountingOperation&>(operation).calls;
     };
   }
@@ -174,55 +174,66 @@ struct CountingOperation final : Operation {
 };
 ```
 
-#### Callables
+#### Handlers
 
-A lambda or other callable becomes an operation in one of two ways, which
-differ in who owns it while the kernel holds its address.
+A handler is a callable that the loop calls with each `Completion`. It must
+be `noexcept`, which the `Handler` concept checks
+(`std::is_nothrow_invocable_v<H&, Completion>`). A handler becomes an
+operation in one of two ways, which differ in who owns it while the kernel
+holds its address.
 
-**The caller owns it.** `CallableOperation<F>` stores the callable `F` by
-value and calls it with each `Completion`. It lives wherever the caller puts
-it (on the stack, in a member, in a coroutine frame or a sender's operation
-state), and the caller keeps it alive until its last completion. It allocates
-nothing, takes callables of any size, and makes one indirect call per
-completion. It can be neither copied nor moved, so it can't leave the address
-the kernel holds. Both front-ends build on this kind.
+**The caller owns it.** `HandlerOperation<H>` stores the handler `H` by value
+and calls it with each `Completion`. It lives wherever the caller puts it (on
+the stack, in a member, in a coroutine frame or a sender's operation state),
+and the caller keeps it alive until its last completion. It allocates nothing,
+takes handlers of any size, and makes one indirect call per completion. It
+can be neither copied nor moved, so it can't leave the address the kernel
+holds. Both front-ends build on this kind.
 
 ```cpp
-CallableOperation operation{[&](Completion completion) { ... }};
+HandlerOperation operation{[&](Completion completion) noexcept { ... }};
 ::io_uring_prep_nop(loop.maybe_submission(lib::Depend(operation)));
 ```
 
-**The loop owns it.** `loop.queue(prepare, callback)` takes a function that
-prepares the submission queue entry and a callable to call with each
-completion. The loop stores the callable in a node of its own, a
-`CallbackOperation` holding a `std::move_only_function<void(Completion)>`, and
-returns the node to a free list after the last completion. The caller has
+**The loop owns it.** `loop.queue(prepare, handler)` takes a function that
+prepares the submission queue entry and a handler to call with each
+completion. The loop stores the handler in a node of its own, a
+`HandlerNode` holding a `std::move_only_function<void(Completion) noexcept>`,
+and returns the node to a free list after the last completion. The caller has
 nothing to keep alive.
 
 ```cpp
 bool queued = loop.queue(
-    [](::io_uring_sqe* submission) { ::io_uring_prep_nop(submission); },
-    [](Completion completion) { ... });
+    [](::io_uring_sqe* submission) noexcept { ::io_uring_prep_nop(submission); },
+    [](Completion completion) noexcept { ... });
 ```
 
 | | Caller-owned | Loop-owned |
 |---|---|---|
 | Who keeps it alive | the caller | the loop |
 | Allocation | none | none once the free list is warm, for captures of 24 bytes or less |
-| Callable size | any | any; larger captures allocate inside `std::move_only_function` |
+| Handler size | any | any; larger captures allocate inside `std::move_only_function` |
 | Indirect calls per completion | one | two (`complete`, then the `std::move_only_function`) |
-| Per-operation storage | the callable | the node: `Operation` plus a 40-byte `std::move_only_function` |
+| Per-operation storage | the handler | the node: `Operation` plus a 40-byte `std::move_only_function` |
 
 The 24 and 40 bytes are libstdc++'s, measured with GCC 16 and Clang 22.
 `std::move_only_function` gives the loop-owned kind its small-buffer storage,
 moves and destruction, so iopia doesn't write them.
 
-**Exceptions from a callback propagate out of `run_once()`.** The entry was
-already returned to the kernel, and the completions still waiting stay in the
-completion queue for the next `run_once()`. A loop-owned node goes back to the
-free list before its last callback runs, by moving the callable out first, so
-a throw loses nothing. That also lets a callback queue a new operation that
-reuses its node.
+**Handlers can't throw, and neither can prepare functions.** The compiler
+enforces it. `complete` is a `noexcept` function pointer, `HandlerOperation`
+and `queue` accept only handlers the `Handler` concept allows, and `queue`
+accepts only prepare functions the `Preparer` concept allows
+(`std::is_nothrow_invocable_v<P, ::io_uring_sqe*>`). A prepare function runs
+after the loop has handed out the entry and counted the operation as pending,
+so a throw there would leave a half-prepared entry behind. A handler that fails reports it through its own
+state, such as an error it stores for its owner. If an exception escapes
+anyway, the program terminates.
+
+The loop can therefore dispatch completions without ever stopping partway
+through a batch, and needs no way to resume one. A loop-owned node goes back
+to the free list before its handler's last call, by moving the handler out
+first, so the handler can queue a new operation that reuses its node.
 
 ### Event loop
 
@@ -235,24 +246,23 @@ operations that resubmit through it hold its address.
   queue entry with its `user_data` set to the operation's address, or null
   when the queue is full. `Depend` marks that the loop keeps a reference that
   can dangle.
-- `queue(prepare, callback)` does the same for a loop-owned callable, and
+- `queue(prepare, handler)` does the same for a loop-owned handler, and
   returns false when the queue is full.
 - `run_once()` submits what is prepared and waits for at least one completion,
-  in one system call (`io_uring_submit_and_wait`). Then it calls back the
+  in one system call (`io_uring_submit_and_wait`). Then it calls the
   operation of every completion that is ready, and returns how many it called.
-  With nothing pending it returns 0 without waiting. A callback may submit
+  With nothing pending it returns 0 without waiting. A handler may submit
   more operations; they go out on the next `run_once()`.
 - A completion whose `user_data` is 0 has no operation, and fails a contract
   check.
 
 **Destroying a loop cancels and drains what is pending.** Tearing down the
 ring with operations pending would mean their completions are never reaped,
-so loop-owned callables would never be destroyed. The destructor submits one
+so loop-owned handlers would never be destroyed. The destructor submits one
 `io_uring_prep_cancel` with `IORING_ASYNC_CANCEL_ANY` (Linux 5.19) and runs
 until nothing is pending, so every operation sees its last completion, the
 cancelled ones with `-ECANCELED`. A caller-owned operation that is still
-pending must therefore outlive the loop. A callback that throws during the
-drain terminates the program, since destructors don't throw.
+pending must therefore outlive the loop.
 
 Step 3 decides the rest: when `run()` returns, what happens when the
 submission queue is full, and whether to batch reaping with
@@ -355,8 +365,9 @@ network protocol between gateways.
 | C++26, from lib's `COPTS`. | Shared with simon and volcano. Coroutines need only C++20. |
 | A ring belongs to one thread. | Simplest to start with, and `lib::Status` isn't thread-safe. |
 | The loop calls an operation through a function pointer stored in it. | Operations carry no vtable, and each front-end supplies its own function. A virtual function would make every operation polymorphic. |
-| Callables are caller-owned (`CallableOperation<F>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
-| A loop cancels and drains pending operations when destroyed. | Every callable sees its last completion and is destroyed; nothing leaks with the ring. |
+| Handlers are caller-owned (`HandlerOperation<H>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
+| A loop cancels and drains pending operations when destroyed. | Every handler sees its last completion and is destroyed; nothing leaks with the ring. |
+| Handlers and prepare functions are `noexcept`, checked at compile time. | The loop never has to recover from a dispatch that stopped partway, which keeps batched reaping simple. We may revisit this later. |
 | iopia writes its own coroutine task, sender concepts and algorithms, modeled on the standard's. | Building them is how we learn the standard, which matters more here than conformance or a shorter list of things to write. This settles the earlier question of our own concepts or stdexec's. |
 | The gateway is a separate package, `gateway`, on the library's public interfaces. | The library never depends on iceoryx2, and the gateway tests the interfaces the way any user would. |
 | The gateway's first version connects iceoryx2 and the network; DDS comes later. | iceoryx2 exposes a file descriptor and shared memory, which fit io_uring directly. DDS brings a choice between writing RTPS and linking a library with threads of its own. |

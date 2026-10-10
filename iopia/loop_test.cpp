@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -17,7 +18,7 @@ namespace {
 // An operation that counts its completions and keeps the last one.
 struct CountingOperation final : Operation {
   CountingOperation() {
-    complete = [](Operation& operation, Completion completion) {
+    complete = [](Operation& operation, Completion completion) noexcept {
       auto& self = static_cast<CountingOperation&>(operation);
       ++self.calls;
       self.last = completion;
@@ -43,9 +44,37 @@ auto submit_nop(lib::Depend<Operation> operation, lib::InOut<Loop> loop)
 }
 
 // Prepares a NOP, for Loop::queue.
-auto prepare_nop(::io_uring_sqe* submission) -> void {
+auto prepare_nop(::io_uring_sqe* submission) noexcept -> void {
   ::io_uring_prep_nop(submission);
 }
+
+// Whether Loop::queue accepts `PrepareType` and `HandlerType`.
+template <typename PrepareType, typename HandlerType>
+concept Queueable =
+    requires(Loop& loop, PrepareType prepare, HandlerType handler) {
+      loop.queue(std::move(prepare), std::move(handler));
+    };
+
+using CannotThrowPrepare = decltype(&prepare_nop);
+using MayThrowPrepare = decltype([](::io_uring_sqe*) {});
+using CannotThrow = decltype([](Completion) noexcept {});
+using MayThrow = decltype([](Completion) {});
+
+// A handler that may throw is refused at compile time, by both owners.
+static_assert(Handler<CannotThrow>);
+static_assert(!Handler<MayThrow>);
+static_assert(Queueable<CannotThrowPrepare, CannotThrow>);
+static_assert(!Queueable<CannotThrowPrepare, MayThrow>);
+
+// So is a prepare function that may throw.
+static_assert(Preparer<CannotThrowPrepare>);
+static_assert(!Preparer<MayThrowPrepare>);
+static_assert(!Queueable<MayThrowPrepare, CannotThrow>);
+
+// An operation's complete function can't throw either.
+using MayThrowComplete = decltype([](Operation&, Completion) {});
+static_assert(
+    !std::is_convertible_v<MayThrowComplete, Operation::CompleteFunction>);
 
 // Runs `loop` until nothing is pending.
 auto run_until_idle(lib::InOut<Loop> loop) -> void {
@@ -57,7 +86,7 @@ auto run_until_idle(lib::InOut<Loop> loop) -> void {
 }  // namespace
 
 TEST_CASE("Loop") {
-  SECTION("ShouldCallBackEachOperationGivenTwoNops") {
+  SECTION("ShouldCompleteEachOperationGivenTwoNops") {
     // Preconditions.
     Loop loop = make_loop();
     CountingOperation first;
@@ -78,12 +107,12 @@ TEST_CASE("Loop") {
     CHECK(loop.pending() == 0u);
   }
 
-  SECTION("ShouldCallBackAgainGivenOperationResubmittedFromItsCallback") {
+  SECTION("ShouldCompleteAgainGivenOperationResubmittedFromItsHandler") {
     // Preconditions.
-    // An operation that submits itself once more from its own callback.
+    // An operation that submits itself once more from its own handler.
     struct RepeatingOperation final : Operation {
       explicit RepeatingOperation(lib::Depend<Loop> loop) : loop_{loop.get()} {
-        complete = [](Operation& operation, Completion) {
+        complete = [](Operation& operation, Completion) noexcept {
           auto& self = static_cast<RepeatingOperation&>(operation);
           if (++self.calls == 1) {
             submit_nop(lib::Depend(self), lib::InOut(*self.loop_));
@@ -133,12 +162,13 @@ TEST_CASE("Loop") {
                     std::logic_error);
   }
 
-  SECTION("ShouldCallCallerOwnedCallableGivenNop") {
+  SECTION("ShouldCallCallerOwnedHandlerGivenNop") {
     // Preconditions.
     Loop loop = make_loop();
     std::vector<Completion> completions;
-    CallableOperation operation{
-        [&](Completion completion) { completions.push_back(completion); }};
+    HandlerOperation operation{[&](Completion completion) noexcept {
+      completions.push_back(completion);
+    }};
     submit_nop(lib::Depend(operation), lib::InOut(loop));
 
     // Under Test.
@@ -150,11 +180,11 @@ TEST_CASE("Loop") {
     CHECK(completions[0].result == 0);
   }
 
-  SECTION("ShouldCallLoopOwnedCallableOnceGivenNop") {
+  SECTION("ShouldCallLoopOwnedHandlerOnceGivenNop") {
     // Preconditions.
     Loop loop = make_loop();
     std::vector<Completion> completions;
-    REQUIRE(loop.queue(prepare_nop, [&](Completion completion) {
+    REQUIRE(loop.queue(prepare_nop, [&](Completion completion) noexcept {
       completions.push_back(completion);
     }));
 
@@ -169,11 +199,12 @@ TEST_CASE("Loop") {
     CHECK(loop.pending() == 0u);
   }
 
-  SECTION("ShouldDestroyLoopOwnedCallableGivenItsLastCompletion") {
+  SECTION("ShouldDestroyLoopOwnedHandlerGivenItsLastCompletion") {
     // Preconditions.
     Loop loop = make_loop();
     auto captured = std::make_shared<int>(0);
-    REQUIRE(loop.queue(prepare_nop, [captured](Completion) { ++*captured; }));
+    REQUIRE(loop.queue(prepare_nop,
+                       [captured](Completion) noexcept { ++*captured; }));
     REQUIRE(captured.use_count() == 2);
 
     // Under Test.
@@ -184,14 +215,15 @@ TEST_CASE("Loop") {
     CHECK(captured.use_count() == 1);
   }
 
-  SECTION("ShouldRefuseLoopOwnedCallableGivenFullQueue") {
+  SECTION("ShouldRefuseLoopOwnedHandlerGivenFullQueue") {
     // Preconditions.
     Loop loop = make_loop(1);
     int calls = 0;
-    REQUIRE(loop.queue(prepare_nop, [&](Completion) { ++calls; }));
+    REQUIRE(loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; }));
 
     // Under Test.
-    bool queued = loop.queue(prepare_nop, [&](Completion) { ++calls; });
+    bool queued =
+        loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; });
 
     // Postconditions.
     CHECK_FALSE(queued);
@@ -200,17 +232,19 @@ TEST_CASE("Loop") {
     CHECK(calls == 1);
   }
 
-  SECTION("ShouldCallBackUntilLastCompletionGivenMultishotTimeout") {
+  SECTION("ShouldCallHandlerUntilLastCompletionGivenMultishotTimeout") {
     // Preconditions.
     Loop loop = make_loop();
     ::__kernel_timespec interval{.tv_sec = 0, .tv_nsec = 1'000'000};
     std::vector<Completion> completions;
     REQUIRE(loop.queue(
-        [&](::io_uring_sqe* submission) {
+        [&](::io_uring_sqe* submission) noexcept {
           ::io_uring_prep_timeout(submission, &interval, 3,
                                   IORING_TIMEOUT_MULTISHOT);
         },
-        [&](Completion completion) { completions.push_back(completion); }));
+        [&](Completion completion) noexcept {
+          completions.push_back(completion);
+        }));
 
     // Under Test.
     run_until_idle(lib::InOut(loop));
@@ -223,21 +257,6 @@ TEST_CASE("Loop") {
     CHECK(completions[2].result == -ETIME);
   }
 
-  SECTION("ShouldReleaseLoopOwnedCallableGivenCallbackThrows") {
-    // Preconditions.
-    Loop loop = make_loop();
-    auto captured = std::make_shared<int>(0);
-    REQUIRE(loop.queue(prepare_nop, [captured](Completion) {
-      throw std::runtime_error{"callback failed"};
-    }));
-
-    // Under Test.
-    // Postconditions.
-    CHECK_THROWS_AS(loop.run_once(), std::runtime_error);
-    CHECK(loop.pending() == 0u);
-    CHECK(captured.use_count() == 1);
-  }
-
   SECTION("ShouldCancelPendingOperationGivenLoopDestroyed") {
     // Preconditions.
     ::__kernel_timespec long_wait{.tv_sec = 60, .tv_nsec = 0};
@@ -246,10 +265,12 @@ TEST_CASE("Loop") {
     REQUIRE(ring);
     auto loop = std::make_unique<Loop>(*std::move(ring));
     REQUIRE(loop->queue(
-        [&](::io_uring_sqe* submission) {
+        [&](::io_uring_sqe* submission) noexcept {
           ::io_uring_prep_timeout(submission, &long_wait, 0, 0);
         },
-        [&](Completion completion) { completions.push_back(completion); }));
+        [&](Completion completion) noexcept {
+          completions.push_back(completion);
+        }));
     REQUIRE(loop->submit());
 
     // Under Test.

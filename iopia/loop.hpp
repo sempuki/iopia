@@ -9,6 +9,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,21 +22,26 @@
 // completions arrive.
 namespace iopia {
 
+// A function that prepares a submission queue entry, which it takes as an
+// ::io_uring_sqe*, and can't throw.
+template <typename PrepareType>
+concept Preparer = std::is_nothrow_invocable_v<PrepareType, ::io_uring_sqe*>;
+
 namespace internal {
 
-// The node that holds a callable the loop owns. It goes back to its free list
-// before its last callback runs.
-struct CallbackOperation final : Operation {
-  explicit CallbackOperation(lib::Depend<std::vector<CallbackOperation*>> free);
+// The node that holds a handler the loop owns. It goes back to its free list
+// before its handler's last call.
+struct HandlerNode final : Operation {
+  explicit HandlerNode(lib::Depend<std::vector<HandlerNode*>> free);
 
-  std::move_only_function<void(Completion)> callback;
-  std::vector<CallbackOperation*>* free_ = nullptr;
+  std::move_only_function<void(Completion) noexcept> handler;
+  std::vector<HandlerNode*>* free_ = nullptr;
 };
 
-// The operation of the loop's own cancel request, which needs no callback.
+// The operation of the loop's own cancel request, which needs no handler.
 struct IgnoredOperation final : Operation {
   IgnoredOperation() {
-    complete = [](Operation&, Completion) {};
+    complete = [](Operation&, Completion) noexcept {};
   }
 };
 
@@ -69,18 +75,19 @@ class Loop final {
   }
 
   // Prepares a submission with `prepare`, which takes the ::io_uring_sqe*, and
-  // has the loop keep `callback` and call it with each completion. Returns
+  // has the loop keep `handler` and call it with each completion. Returns
   // false, and keeps nothing, if the queue is full.
-  template <typename PrepareType, typename CallbackType>
-  [[nodiscard]] auto queue(PrepareType&& prepare, CallbackType&& callback)
+  template <typename PrepareType, typename HandlerType>
+    requires Preparer<PrepareType> && Handler<std::decay_t<HandlerType>>
+  [[nodiscard]] auto queue(PrepareType&& prepare, HandlerType&& handler)
       -> bool {
-    internal::CallbackOperation& node = acquire_node();
+    internal::HandlerNode& node = acquire_node();
     ::io_uring_sqe* submission = maybe_submission(lib::Depend(node));
     if (!submission) {
       free_.push_back(&node);
       return false;
     }
-    node.callback = std::forward<CallbackType>(callback);
+    node.handler = std::forward<HandlerType>(handler);
     std::invoke(std::forward<PrepareType>(prepare), submission);
     return true;
   }
@@ -91,8 +98,8 @@ class Loop final {
   }
 
   // Submits what is prepared, waits for at least one completion, and calls
-  // back the operation of every completion that is ready. Returns how many it
-  // called back, or 0 at once if nothing is pending.
+  // the operation of every completion that is ready. Returns how many it
+  // called, or 0 at once if nothing is pending.
   auto run_once() -> std::expected<unsigned, lib::Status> {
     if (pending_ == 0) {
       return 0u;
@@ -111,7 +118,7 @@ class Loop final {
   auto pending() const -> std::size_t { return pending_; }
 
  private:
-  auto dispatch(Completion completion) -> void {
+  auto dispatch(Completion completion) noexcept -> void {
     auto* operation = reinterpret_cast<Operation*>(
         static_cast<std::uintptr_t>(completion.user_data));
     CHECK_INVARIANT(operation);
@@ -124,15 +131,15 @@ class Loop final {
   }
 
   // A node from the free list, or a new one if the list is empty.
-  auto acquire_node() -> internal::CallbackOperation&;
+  auto acquire_node() -> internal::HandlerNode&;
 
   // Cancels every pending operation and runs until none is pending.
   auto cancel_and_drain() -> void;
 
   Ring ring_;
   std::size_t pending_ = 0;
-  std::vector<std::unique_ptr<internal::CallbackOperation>> nodes_;
-  std::vector<internal::CallbackOperation*> free_;
+  std::vector<std::unique_ptr<internal::HandlerNode>> nodes_;
+  std::vector<internal::HandlerNode*> free_;
   internal::IgnoredOperation cancel_;
 };
 
