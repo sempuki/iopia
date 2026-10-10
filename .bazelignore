@@ -1,0 +1,5 @@
+2nd_party/lib
+# Claude Code worktrees live here and contain their own copy of the repo.
+.claude
+# The clangd mirror, which 2nd_party/lib/bazel/lsp_mirror.py builds.
+.lsp

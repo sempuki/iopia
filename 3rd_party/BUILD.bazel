@@ -1,0 +1,10 @@
+# Copyright 2026 -- CONTRIBUTORS. See LICENSE.
+
+package(default_visibility = ["//visibility:public"])
+
+# Libraries, from the Bazel Central Registry at the versions in MODULE.bazel.
+
+alias(
+    name = "liburing",
+    actual = "@liburing",
+)

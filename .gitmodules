@@ -1,0 +1,3 @@
+[submodule "2nd_party/lib"]
+	path = 2nd_party/lib
+	url = git@github.com:sempuki/lib.git

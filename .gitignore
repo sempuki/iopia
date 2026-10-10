@@ -33,3 +33,15 @@
 
 # Bazel
 bazel-*
+
+# Local Bazel overrides
+user.bazelrc
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Generated for clangd by 2nd_party/lib/bazel/lsp_mirror.py
+compile_commands.json
+
+# The clangd mirror: 2nd_party/lib/bazel/lsp_mirror.py
+.lsp/

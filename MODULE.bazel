@@ -1,0 +1,18 @@
+# Copyright 2026 -- CONTRIBUTORS. See LICENSE.
+
+module(
+    name = "iopia",
+    bazel_compatibility = [">=9.0.0"],
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.25")
+
+# Third-party libraries, depended on through //3rd_party (see 3rd_party/README.md).
+bazel_dep(name = "liburing", version = "2.15")
+
+# Shared core libraries, vendored as a git submodule.
+bazel_dep(name = "lib")
+local_path_override(
+    module_name = "lib",
+    path = "2nd_party/lib",
+)

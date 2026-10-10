@@ -1,7 +1,1 @@
-# ---
-Language:     Cpp
-BasedOnStyle: Google
-
-PointerAlignment: Left
-ColumnLimit: 80
-IncludeBlocks: Preserve
+2nd_party/lib/.clang-format

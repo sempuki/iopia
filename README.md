@@ -1,1 +1,47 @@
 # iopia
+
+C++ front-ends for Linux's io_uring: C++20 coroutines and senders and
+receivers, both built on one ring and one completion protocol.
+
+The design, its decisions and the plan are in [Design.md](Design.md).
+
+## Build
+
+Requires Linux and [Bazelisk](https://github.com/bazelbuild/bazelisk)
+(installed as `bazel`); the Bazel release is pinned in `.bazelversion`.
+liburing comes from the Bazel Central Registry, and the shared core libraries
+from the [lib](https://github.com/sempuki/lib) submodule:
+
+```sh
+git clone --recurse-submodules git@github.com:sempuki/iopia.git
+# or, in an existing clone:
+git submodule update --init
+
+bazel test //...
+bazel run //:hello   # print the liburing version iopia links
+```
+
+Code targets C++26; flags come from `@lib//bazel:copts.bzl`. Put machine-local
+flags in an untracked `user.bazelrc`.
+
+## Editor setup
+
+clangd needs a `compile_commands.json`. lib's `bazel/lsp_mirror.py` builds in
+an output base of its own, copies the headers clangd reads into `.lsp/mirror/`
+(ignored by git and Bazel), and writes `compile_commands.json` against that
+mirror:
+
+```sh
+python3 2nd_party/lib/bazel/lsp_mirror.py                  # build the mirror now
+python3 2nd_party/lib/bazel/lsp_mirror.py --if-stale       # only if anything changed
+python3 2nd_party/lib/bazel/lsp_mirror.py --install-hooks  # after checkout, merge, rebase
+```
+
+Restart clangd (`:LspRestart` in Neovim) after the first build.
+
+## Credits
+
+| Library | Used for | License |
+|---|---|---|
+| [liburing](https://github.com/axboe/liburing) | The io_uring system calls and ring helpers | MIT or LGPL-2.1 |
+| [Catch2](https://github.com/catchorg/Catch2) | Tests | BSL-1.0 |
