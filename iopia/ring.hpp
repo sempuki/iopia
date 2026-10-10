@@ -4,10 +4,12 @@
 
 #include <liburing.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
 #include <optional>
+#include <span>
 
 #include "base/core.hpp"
 #include "base/status.hpp"
@@ -17,7 +19,8 @@
 namespace iopia {
 
 // What the kernel reports for one finished submission. It is a copy of the
-// completion queue entry, so the entry goes back to the kernel at once.
+// completion queue entry, so the entry can go back to the kernel before anyone
+// handles it.
 struct Completion final {
   std::uint64_t user_data = 0;  // The submission's user_data, unchanged.
   std::uint32_t flags = 0;      // IORING_CQE_F_* bits.
@@ -87,6 +90,25 @@ class Ring final {
     return take(entry);
   }
 
+  // Copies as many ready completions as fit into `into`, oldest first, and
+  // returns their entries to the kernel together. Returns how many it copied.
+  // It never waits or enters the kernel, so completions the kernel holds back
+  // after an overflow wait for the next submit_and_wait().
+  auto take_completions(std::span<Completion> into) -> std::size_t {
+    CHECK_PRECONDITION(ring_);
+    std::size_t taken = 0;
+    unsigned head = 0;
+    ::io_uring_cqe* entry = nullptr;
+    io_uring_for_each_cqe(ring_.get(), head, entry) {
+      if (taken == into.size()) {
+        break;
+      }
+      into[taken++] = copy(*entry);
+    }
+    ::io_uring_cq_advance(ring_.get(), static_cast<unsigned>(taken));
+    return taken;
+  }
+
   // Waits for the next completion and returns a copy of it.
   auto wait() -> std::expected<Completion, lib::Status> {
     CHECK_PRECONDITION(ring_);
@@ -101,13 +123,17 @@ class Ring final {
  private:
   explicit Ring(::io_uring* ring) : ring_{ring} {}
 
+  static auto copy(::io_uring_cqe const& entry) -> Completion {
+    return Completion{
+        .user_data = entry.user_data,
+        .flags = entry.flags,
+        .result = entry.res,
+    };
+  }
+
   // Copies `entry` and returns it to the kernel.
   auto take(::io_uring_cqe* entry) -> Completion {
-    Completion completion{
-        .user_data = entry->user_data,
-        .flags = entry->flags,
-        .result = entry->res,
-    };
+    Completion completion = copy(*entry);
     ::io_uring_cqe_seen(ring_.get(), entry);
     return completion;
   }

@@ -140,9 +140,12 @@ We keep the heap for the simpler move. Goal 3 argues for the value instead, so
 measure the hot calls before deciding to change it.
 
 `maybe_submission()` returns the next free submission queue entry, or null when
-the queue is full. `wait()` copies a completion into a `Completion` and returns
-the entry to the kernel at once, so no caller holds a pointer into the
-completion queue.
+the queue is full. Completions come out as copies, so no caller holds a
+pointer into the completion queue. `wait()` and `maybe_completion()` copy one
+completion and return its entry to the kernel at once.
+`take_completions(into)` copies as many ready completions as fit in the span
+`into` and returns their entries together, with one `io_uring_cq_advance`. It
+reads the queue with `io_uring_for_each_cqe` and never enters the kernel.
 
 ### Completion protocol
 
@@ -243,9 +246,11 @@ can be neither copied nor moved, because its loop-owned nodes and the
 operations that resubmit through it hold its address.
 
 - `maybe_submission(Depend(operation))` returns the next free submission
-  queue entry with its `user_data` set to the operation's address, or null
-  when the queue is full. `Depend` marks that the loop keeps a reference that
-  can dangle.
+  queue entry with its `user_data` set to the operation's address. `Depend`
+  marks that the loop keeps a reference that can dangle. If the queue is
+  full, it submits what the queue holds and tries once more. It returns null
+  only if that submit fails (for example with `-EBUSY` while the kernel holds
+  completions back) or the queue is still full.
 - `queue(prepare, handler)` does the same for a loop-owned handler, and
   returns false when the queue is full.
 - `run_once()` submits what is prepared and waits for at least one completion,
@@ -253,6 +258,10 @@ operations that resubmit through it hold its address.
   operation of every completion that is ready, and returns how many it called.
   With nothing pending it returns 0 without waiting. A handler may submit
   more operations; they go out on the next `run_once()`.
+- `run()` calls `run_once()` until nothing is pending or a handler calls
+  `stop()`. It retries an interrupted wait (`-EINTR`) and returns any other
+  error at once. `stop()` affects only the `run()` in progress, so the next
+  `run()` starts fresh.
 - A completion whose `user_data` is 0 has no operation, and fails a contract
   check.
 
@@ -264,10 +273,24 @@ until nothing is pending, so every operation sees its last completion, the
 cancelled ones with `-ECANCELED`. A caller-owned operation that is still
 pending must therefore outlive the loop.
 
-Step 3 decides the rest: when `run()` returns, what happens when the
-submission queue is full, and whether to batch reaping with
-`io_uring_peek_batch_cqe` and a single `io_uring_cq_advance`. Today each
-completion is copied and returned to the kernel one at a time.
+**Completions are reaped in batches.** `run_once()` copies up to 32 ready
+completions into an array on its stack with `take_completions`, which returns
+their entries to the kernel with one store to the queue's head, then
+dispatches the copies. It repeats while a batch comes back full.
+
+```
+take_completions(batch)   one read of the tail, copy up to 32
+io_uring_cq_advance(n)    one store to the head; the slots are free again
+dispatch(batch[0..n))     handlers run on the copies
+```
+
+Batching replaces a store to the shared head per completion with one per
+batch, which keeps the cache line the kernel reads from moving between cores
+on every completion. Returning the slots before dispatching keeps them free
+for completions the kernel posts while handlers run. Handlers can't throw, so
+a batch is always dispatched to the end, and the loop never has to keep one
+to finish later. Stopping after a batch that isn't full means a stream of
+completions that keeps arriving can't hold `run_once()` forever.
 
 ### Coroutine front-end
 
@@ -367,6 +390,9 @@ network protocol between gateways.
 | The loop calls an operation through a function pointer stored in it. | Operations carry no vtable, and each front-end supplies its own function. A virtual function would make every operation polymorphic. |
 | Handlers are caller-owned (`HandlerOperation<H>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
 | A loop cancels and drains pending operations when destroyed. | Every handler sees its last completion and is destroyed; nothing leaks with the ring. |
+| The loop reaps completions in batches of 32, copied out before dispatch. | One store to the shared head per batch instead of per completion, and the slots are free again before handlers run. |
+| A full submission queue is submitted and retried once; null means it still failed. | Most programs never see a full queue, and callers keep one simple contract: null means try later. |
+| `run()` returns when nothing is pending or a handler calls `stop()`. | It is what `sync_wait` and a coroutine's top-level run will need, without a timeout API yet. |
 | Handlers and prepare functions are `noexcept`, checked at compile time. | The loop never has to recover from a dispatch that stopped partway, which keeps batched reaping simple. We may revisit this later. |
 | iopia writes its own coroutine task, sender concepts and algorithms, modeled on the standard's. | Building them is how we learn the standard, which matters more here than conformance or a shorter list of things to write. This settles the earlier question of our own concepts or stdexec's. |
 | The gateway is a separate package, `gateway`, on the library's public interfaces. | The library never depends on iceoryx2, and the gateway tests the interfaces the way any user would. |
@@ -388,8 +414,6 @@ network protocol between gateways.
 - **Registering iceoryx2's shared memory as a fixed buffer:** whether iceoryx2
   exposes its segments' addresses and sizes, and whether it remaps them while
   the gateway runs.
-- **What happens when the submission queue is full:** submit and retry, or
-  report an error to the caller.
 - **Cancellation:** how a coroutine and a stop token each map to
   `IORING_OP_ASYNC_CANCEL`.
 
@@ -399,7 +423,8 @@ network protocol between gateways.
    and reaps its completion.
 2. **Completion protocol.** The operation type, `user_data` dispatch, and
    `run_once()`.
-3. **Event loop.** Batching, a full submission queue, and when `run()` returns.
+3. **Event loop.** Batched reaping, a full submission queue, and `run()` with
+   `stop()`.
 4. **Coroutine front-end.** `Task<T>`, and awaitables for nop, read, write and
    timeout.
 5. **Sender front-end.** iopia's sender concepts, a scheduler, the same

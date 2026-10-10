@@ -36,24 +36,30 @@ auto Loop::acquire_node() -> internal::HandlerNode& {
   return *node;
 }
 
+auto Loop::run() -> std::expected<void, lib::Status> {
+  while (pending_ > 0 && !stopping_) {
+    auto dispatched = run_once();
+    if (!dispatched &&
+        dispatched.error().kind() != lib::watch(IoError::INTERRUPTED)) {
+      stopping_ = false;
+      return Failure{std::move(dispatched).error()};
+    }
+  }
+  stopping_ = false;
+  return {};
+}
+
 auto Loop::cancel_and_drain() -> void {
   if (pending_ == 0) {
     return;
   }
-  ::io_uring_sqe* submission = maybe_submission(lib::Depend(cancel_));
-  if (!submission) {
-    // The queue is full; submitting what it holds makes room.
-    auto _ = ring_.submit();
-    submission = maybe_submission(lib::Depend(cancel_));
-  }
-  if (submission) {
+  if (::io_uring_sqe* submission = maybe_submission(lib::Depend(cancel_))) {
     ::io_uring_prep_cancel(submission, nullptr,
                            IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_ALL);
   }
+  // A handler may call stop() during the drain; keep running regardless.
   while (pending_ > 0) {
-    auto dispatched = run_once();
-    if (!dispatched &&
-        dispatched.error().kind() != lib::watch(IoError::INTERRUPTED)) {
+    if (!run()) {
       // Waiting can't make progress; give up on what is left.
       return;
     }

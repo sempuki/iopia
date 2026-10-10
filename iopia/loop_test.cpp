@@ -29,8 +29,8 @@ struct CountingOperation final : Operation {
   Completion last;
 };
 
-auto make_loop(unsigned entries = 8) -> Loop {
-  auto ring = Ring::make(entries);
+auto make_loop(unsigned entries = 8, unsigned flags = 0) -> Loop {
+  auto ring = Ring::make(entries, flags);
   REQUIRE(ring);
   return Loop{*std::move(ring)};
 }
@@ -215,7 +215,7 @@ TEST_CASE("Loop") {
     CHECK(captured.use_count() == 1);
   }
 
-  SECTION("ShouldRefuseLoopOwnedHandlerGivenFullQueue") {
+  SECTION("ShouldSubmitAndQueueGivenFullQueue") {
     // Preconditions.
     Loop loop = make_loop(1);
     int calls = 0;
@@ -226,10 +226,93 @@ TEST_CASE("Loop") {
         loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; });
 
     // Postconditions.
+    CHECK(queued);
+    CHECK(loop.pending() == 2u);
+    run_until_idle(lib::InOut(loop));
+    CHECK(calls == 2);
+  }
+
+  SECTION("ShouldRefuseLoopOwnedHandlerGivenFullQueueThatCantSubmit") {
+    // Preconditions.
+    // A disabled ring hands out entries but refuses to submit them.
+    Loop loop = make_loop(1, IORING_SETUP_R_DISABLED);
+    REQUIRE(loop.queue(prepare_nop, [](Completion) noexcept {}));
+
+    // Under Test.
+    bool queued = loop.queue(prepare_nop, [](Completion) noexcept {});
+
+    // Postconditions.
     CHECK_FALSE(queued);
     CHECK(loop.pending() == 1u);
-    run_until_idle(lib::InOut(loop));
-    CHECK(calls == 1);
+  }
+
+  SECTION("ShouldDispatchEveryCompletionGivenMoreThanOneBatch") {
+    // Preconditions.
+    constexpr int COUNT = 100;
+    Loop loop = make_loop(128);
+    int calls = 0;
+    for (int i = 0; i < COUNT; ++i) {
+      REQUIRE(loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; }));
+    }
+
+    // Under Test.
+    auto dispatched = loop.run_once();
+
+    // Postconditions.
+    REQUIRE(dispatched);
+    CHECK(*dispatched == unsigned{COUNT});
+    CHECK(calls == COUNT);
+    CHECK(loop.pending() == 0u);
+  }
+
+  SECTION("ShouldRunUntilNothingPendingGivenHandlersThatQueueMore") {
+    // Preconditions.
+    Loop loop = make_loop();
+    int calls = 0;
+    // Each handler queues the next, three deep.
+    auto queue_next = [&](this auto const& self) -> void {
+      REQUIRE(loop.queue(prepare_nop, [&, self](Completion) noexcept {
+        if (++calls < 3) {
+          self();
+        }
+      }));
+    };
+    queue_next();
+
+    // Under Test.
+    auto ran = loop.run();
+
+    // Postconditions.
+    REQUIRE(ran);
+    CHECK(calls == 3);
+    CHECK(loop.pending() == 0u);
+  }
+
+  SECTION("ShouldReturnFromRunGivenHandlerCallsStop") {
+    // Preconditions.
+    Loop loop = make_loop();
+    ::__kernel_timespec interval{.tv_sec = 0, .tv_nsec = 1'000'000};
+    int calls = 0;
+    // A multishot timeout with no count fires until it is cancelled.
+    REQUIRE(loop.queue(
+        [&](::io_uring_sqe* submission) noexcept {
+          ::io_uring_prep_timeout(submission, &interval, 0,
+                                  IORING_TIMEOUT_MULTISHOT);
+        },
+        [&](Completion) noexcept {
+          ++calls;
+          loop.stop();
+        }));
+
+    // Under Test.
+    auto first = loop.run();
+    auto second = loop.run();
+
+    // Postconditions.
+    REQUIRE(first);
+    REQUIRE(second);
+    CHECK(calls == 2);
+    CHECK(loop.pending() == 1u);
   }
 
   SECTION("ShouldCallHandlerUntilLastCompletionGivenMultishotTimeout") {
