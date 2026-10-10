@@ -4,11 +4,13 @@
 
 #include <liburing.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -48,11 +50,13 @@ struct IgnoredOperation final : Operation {
 }  // namespace internal
 
 // Owns a Ring, ties each submission to the Operation it completes, and counts
-// the operations whose last completion hasn't arrived. Every submission's
-// user_data is the address of its Operation, so a completion whose user_data is
-// 0 has no operation and fails a contract check. A Loop can be neither copied
-// nor moved, because its nodes and its operations hold its address. Destroying
-// it cancels what is pending and waits for every last completion.
+// the operations whose last completion hasn't arrived. It reaps completions in
+// batches, and runs until nothing is pending or a handler calls stop(). Every
+// submission's user_data is the address of its Operation, so a completion whose
+// user_data is 0 has no operation and fails a contract check. A Loop can be
+// neither copied nor moved, because its nodes and its operations hold its
+// address. Destroying it cancels what is pending and waits for every last
+// completion.
 class Loop final {
  public:
   DECLARE_COPY_DELETE(Loop);
@@ -62,11 +66,15 @@ class Loop final {
   ~Loop();
 
   // The next free submission queue entry, with its user_data set to
-  // `operation`, or null if the queue is full. The caller prepares it with an
-  // io_uring_prep_* function.
+  // `operation`. The caller prepares it with an io_uring_prep_* function. If
+  // the queue is full, it submits what the queue holds and tries once more,
+  // and returns null if that fails or the queue is still full.
   auto maybe_submission(lib::Depend<Operation> operation) -> ::io_uring_sqe* {
     CHECK_PRECONDITION(operation->complete);
     ::io_uring_sqe* submission = ring_.maybe_submission();
+    if (!submission && ring_.submit()) [[unlikely]] {
+      submission = ring_.maybe_submission();
+    }
     if (submission) {
       ::io_uring_sqe_set_data(submission, operation.get());
       ++pending_;
@@ -105,13 +113,16 @@ class Loop final {
       return 0u;
     }
     RETURN_IF_UNEXPECTED(ring_.submit_and_wait(1));
-    unsigned dispatched = 0;
-    while (auto completion = ring_.maybe_completion()) {
-      ++dispatched;
-      dispatch(*completion);
-    }
-    return dispatched;
+    return dispatch_ready();
   }
+
+  // Calls run_once() until nothing is pending or a handler calls stop(). An
+  // interrupted wait is retried; any other error is returned at once.
+  auto run() -> std::expected<void, lib::Status>;
+
+  // Makes run() return once the completions it is dispatching are done. It
+  // affects only the run() in progress.
+  auto stop() -> void { stopping_ = true; }
 
   // How many operations have a submission whose last completion hasn't been
   // dispatched.
@@ -130,14 +141,35 @@ class Loop final {
     operation->complete(*operation, completion);
   }
 
+  // Copies the ready completions a batch at a time, returns each batch to the
+  // kernel, then dispatches it. It stops after a batch that isn't full, so
+  // completions that keep arriving can't hold it forever.
+  auto dispatch_ready() -> unsigned {
+    std::array<Completion, COMPLETION_BATCH> batch;
+    unsigned dispatched = 0;
+    std::size_t taken = 0;
+    do {
+      taken = ring_.take_completions(batch);
+      for (Completion completion : std::span{batch}.first(taken)) {
+        dispatch(completion);
+      }
+      dispatched += static_cast<unsigned>(taken);
+    } while (taken == batch.size());
+    return dispatched;
+  }
+
   // A node from the free list, or a new one if the list is empty.
   auto acquire_node() -> internal::HandlerNode&;
 
   // Cancels every pending operation and runs until none is pending.
   auto cancel_and_drain() -> void;
 
+  // How many completions dispatch_ready() copies out of the ring at once.
+  static constexpr std::size_t COMPLETION_BATCH = 32;
+
   Ring ring_;
   std::size_t pending_ = 0;
+  bool stopping_ = false;
   std::vector<std::unique_ptr<internal::HandlerNode>> nodes_;
   std::vector<internal::HandlerNode*> free_;
   internal::IgnoredOperation cancel_;

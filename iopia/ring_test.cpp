@@ -2,6 +2,7 @@
 
 #include "iopia/ring.hpp"
 
+#include <array>
 #include <cstdint>
 #include <utility>
 
@@ -98,6 +99,68 @@ TEST_CASE("Ring") {
     REQUIRE(second);
     CHECK(first->user_data + second->user_data == 3u);
     CHECK_FALSE(ring->maybe_completion());
+  }
+
+  SECTION("ShouldTakeEveryReadyCompletionInOrderGivenRoomForAll") {
+    // Preconditions.
+    auto ring = Ring::make(8);
+    REQUIRE(ring);
+    for (std::uint64_t user_data : {1u, 2u, 3u}) {
+      ::io_uring_sqe* submission = ring->maybe_submission();
+      REQUIRE(submission);
+      ::io_uring_prep_nop(submission);
+      ::io_uring_sqe_set_data64(submission, user_data);
+    }
+    REQUIRE(ring->submit_and_wait(3));
+    std::array<Completion, 8> into;
+
+    // Under Test.
+    std::size_t taken = ring->take_completions(into);
+
+    // Postconditions.
+    REQUIRE(taken == 3u);
+    CHECK(into[0].user_data == 1u);
+    CHECK(into[1].user_data == 2u);
+    CHECK(into[2].user_data == 3u);
+    CHECK_FALSE(ring->maybe_completion());
+  }
+
+  SECTION("ShouldLeaveTheRestReadyGivenRoomForFewer") {
+    // Preconditions.
+    auto ring = Ring::make(8);
+    REQUIRE(ring);
+    for (std::uint64_t user_data : {1u, 2u, 3u}) {
+      ::io_uring_sqe* submission = ring->maybe_submission();
+      REQUIRE(submission);
+      ::io_uring_prep_nop(submission);
+      ::io_uring_sqe_set_data64(submission, user_data);
+    }
+    REQUIRE(ring->submit_and_wait(3));
+    std::array<Completion, 2> into;
+
+    // Under Test.
+    std::size_t first = ring->take_completions(into);
+    std::uint64_t first_user_data = into[0].user_data;
+    std::size_t second = ring->take_completions(into);
+
+    // Postconditions.
+    CHECK(first == 2u);
+    CHECK(first_user_data == 1u);
+    REQUIRE(second == 1u);
+    CHECK(into[0].user_data == 3u);
+  }
+
+  SECTION("ShouldTakeNothingGivenNothingSubmitted") {
+    // Preconditions.
+    auto ring = Ring::make(8);
+    REQUIRE(ring);
+    std::array<Completion, 4> into;
+
+    // Under Test.
+    std::size_t taken = ring->take_completions(into);
+
+    // Postconditions.
+    CHECK(taken == 0u);
   }
 
   SECTION("ShouldFailAsInvalidGivenZeroEntries") {
