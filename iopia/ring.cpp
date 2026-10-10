@@ -4,7 +4,8 @@
 
 namespace iopia {
 
-auto internal::ExitRing::operator()(::io_uring* ring) const noexcept -> void {
+auto internal::IoUringDelete::operator()(::io_uring* ring) const noexcept
+    -> void {
   ::io_uring_queue_exit(ring);
   delete ring;
 }

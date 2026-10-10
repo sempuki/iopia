@@ -27,7 +27,7 @@ struct Completion final {
 namespace internal {
 
 // Tears down an io_uring that io_uring_queue_init set up, and frees it.
-struct ExitRing final {
+struct IoUringDelete final {
   auto operator()(::io_uring* ring) const noexcept -> void;
 };
 
@@ -112,7 +112,7 @@ class Ring final {
     return completion;
   }
 
-  std::unique_ptr<::io_uring, internal::ExitRing> ring_;
+  std::unique_ptr<::io_uring, internal::IoUringDelete> ring_;
 };
 
 }  // namespace iopia
