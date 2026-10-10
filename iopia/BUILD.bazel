@@ -1,0 +1,42 @@
+# Copyright 2026 -- CONTRIBUTORS. See LICENSE.
+
+load("@lib//bazel:copts.bzl", "COPTS")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "io_error",
+    srcs = ["io_error.cpp"],
+    hdrs = ["io_error.hpp"],
+    copts = COPTS,
+    deps = [
+        "@lib//base:core",
+        "@lib//base:status",
+    ],
+)
+
+cc_library(
+    name = "ring",
+    srcs = ["ring.cpp"],
+    hdrs = ["ring.hpp"],
+    copts = COPTS,
+    deps = [
+        ":io_error",
+        "//3rd_party:liburing",
+        "@lib//base:core",
+        "@lib//base:status",
+    ],
+)
+
+[cc_test(
+    name = test + "_test",
+    size = "small",
+    srcs = [test + "_test.cpp"],
+    copts = COPTS,
+    deps = [
+        ":" + test,
+        "@lib//base:testing",
+    ],
+) for test in ["ring"]]

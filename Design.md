@@ -42,6 +42,15 @@ and the rest.
 included from the repository root (`#include "iopia/ring.hpp"`), and
 implementation details live in `iopia::internal`.
 
+**C symbols are written with the global namespace qualifier,**
+`::io_uring_get_sqe(...)` and `::io_uring_sqe*`, so a reader can tell
+liburing's C API from iopia's own names. Macros such as `IORING_SETUP_SQPOLL`
+and `EINVAL` can't be qualified and stay as they are.
+
+**Names avoid abbreviations,** except where they come from the C API:
+`submission`, not `sqe`. `IoError` keeps "io", because it follows io_uring's
+naming.
+
 **Errors are `std::expected<T, lib::Status>`.** liburing reports failure as a
 negative `errno`. iopia maps it to a status domain, an `enum class` with its
 messages in a `lib::EnumStatusKindConditionMixin` specialization, as simon's
@@ -77,6 +86,33 @@ an error, so `Ring::make(...)` returns `std::expected<Ring, lib::Status>`.
 
 `Ring` owns one `io_uring`. It is move-only, made by `Ring::make`, and calls
 `io_uring_queue_exit` when destroyed unless it was moved from.
+
+**The `io_uring` lives on the heap,** held by a `std::unique_ptr` whose deleter
+calls `io_uring_queue_exit`. A moved-from `unique_ptr` is null and runs no
+deleter, so `Ring`'s moves are the defaults, and there is no flag to say
+whether a `Ring` still owns its `io_uring`. The `io_uring` also keeps its
+address when the `Ring` moves, though nothing relies on that yet.
+
+It could live in the `Ring` by value instead. liburing's `struct io_uring`
+holds only an fd, sizes and flags, and pointers into the kernel's mapped rings,
+none into itself, and the kernel never learns its address. So it can be copied
+to a new address safely.
+
+| | Heap (chosen) | By value |
+|---|---|---|
+| Allocations per ring | one | none |
+| Each `get_sqe`, `submit` and `wait` | loads the pointer first | reaches the struct directly |
+| Move code | the defaults | hand-written, about 10 lines |
+| Moved-from marker | a null pointer | `ring_fd = -1`, or a separate flag |
+| Size of `Ring` | 8 bytes | about 216 bytes |
+
+We keep the heap for the simpler move. Goal 3 argues for the value instead, so
+measure the hot calls before deciding to change it.
+
+`maybe_submission()` returns the next free submission queue entry, or null when
+the queue is full. `wait()` copies a completion into a `Completion` and returns
+the entry to the kernel at once, so no caller holds a pointer into the
+completion queue.
 
 ### Completion protocol
 
