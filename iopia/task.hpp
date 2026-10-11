@@ -24,8 +24,9 @@ class Task;
 
 namespace internal {
 
-// What every task's promise shares: it starts suspended, and when it finishes
-// it resumes the coroutine that awaited it, or returns to whoever resumed it.
+// The part of a promise that every task shares. A task starts suspended, and
+// when it finishes it resumes the coroutine that awaited it, or returns to
+// whoever resumed it.
 class PromiseBase {
  public:
   // A task that finishes while its awaiter is still starting it returns to
@@ -88,7 +89,7 @@ class Promise<void> final : public PromiseBase {
 
 }  // namespace internal
 
-// A coroutine that returns a ValueType. It is lazy: it starts when it is
+// A coroutine that returns a ValueType. It is lazy and starts when it is
 // awaited, or when run() is given it, and it is move-only. Awaiting it from
 // another task resumes that task when it finishes.
 template <typename ValueType>
@@ -97,7 +98,6 @@ class [[nodiscard]] Task final {
   using promise_type = internal::Promise<ValueType>;
 
   DECLARE_COPY_DELETE(Task);
-
   Task(Task&& that) noexcept
       : coroutine_{std::exchange(that.coroutine_, nullptr)} {}
 

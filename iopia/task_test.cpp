@@ -20,22 +20,22 @@ auto make_loop() -> Loop {
 
 auto forty_two() -> Task<std::int32_t> { co_return 42; }
 
-auto after_nop(Depend<Loop> loop) -> Task<std::int32_t> {
-  auto nop = co_await Nop{loop};
-  CHECK(nop);
+auto after_no_op(Depend<Loop> loop) -> Task<std::int32_t> {
+  auto no_op = co_await NoOp{loop};
+  CHECK(no_op);
   co_return 7;
 }
 
 auto doubled(Depend<Loop> loop) -> Task<std::int32_t> {
-  std::int32_t value = co_await after_nop(loop);
+  std::int32_t value = co_await after_no_op(loop);
   co_return value * 2;
 }
 
-auto count_nops(Depend<Loop> loop, std::int32_t count,
-                Depend<std::int32_t> done) -> Task<void> {
+auto count_no_ops(Depend<Loop> loop, std::int32_t count,
+                  Depend<std::int32_t> done) -> Task<void> {
   for (std::int32_t index = 0; index < count; ++index) {
-    auto nop = co_await Nop{loop};
-    CHECK(nop);
+    auto no_op = co_await NoOp{loop};
+    CHECK(no_op);
     ++*done;
   }
 }
@@ -68,12 +68,12 @@ TEST_CASE("Task") {
     CHECK(*value == 42);
   }
 
-  SECTION("ShouldReturnValueGivenTaskThatAwaitsNop") {
+  SECTION("ShouldReturnValueGivenTaskThatAwaitsNoOp") {
     // Preconditions.
     Loop loop = make_loop();
 
     // Under Test.
-    auto value = run(InOut(loop), after_nop(Depend(loop)));
+    auto value = run(InOut(loop), after_no_op(Depend(loop)));
 
     // Postconditions.
     REQUIRE(value);
@@ -99,7 +99,7 @@ TEST_CASE("Task") {
     std::int32_t done = 0;
 
     // Under Test.
-    auto ran = run(InOut(loop), count_nops(Depend(loop), 3, Depend(done)));
+    auto ran = run(InOut(loop), count_no_ops(Depend(loop), 3, Depend(done)));
 
     // Postconditions.
     REQUIRE(ran);

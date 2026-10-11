@@ -8,8 +8,8 @@
 #include "base/core.hpp"
 #include "iopia/ring.hpp"
 
-// What the loop knows of a pending operation, and the operation that wraps a
-// handler its caller owns.
+// The base of every operation the loop dispatches, and the operation that
+// wraps a handler its caller owns.
 namespace iopia {
 
 // The base of every operation. The loop knows only the function to call when
@@ -25,7 +25,8 @@ struct Operation {
   CompleteFunction complete = nullptr;
 };
 
-// A completion handler: a callable that takes each Completion and can't throw.
+// A completion handler is a callable that takes each Completion and can't
+// throw.
 template <typename HandlerType>
 concept Handler = std::is_nothrow_invocable_v<HandlerType&, Completion>;
 

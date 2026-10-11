@@ -9,7 +9,7 @@
 
 #include "base/status.hpp"
 
-// What iopia says when a liburing call fails.
+// The errors iopia reports when a liburing call fails.
 namespace iopia {
 
 // The reasons a liburing call failed, grouped from the errno it returned. The

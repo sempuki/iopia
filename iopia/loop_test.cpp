@@ -35,15 +35,15 @@ auto make_loop(std::uint32_t entries = 8, std::uint32_t flags = 0) -> Loop {
   return Loop{*std::move(ring)};
 }
 
-// Submits a NOP that completes `operation`.
-auto submit_nop(Depend<Operation> operation, InOut<Loop> loop) -> void {
+// Submits a no-op that completes `operation`.
+auto submit_no_op(Depend<Operation> operation, InOut<Loop> loop) -> void {
   ::io_uring_sqe* submission = loop->maybe_submission(operation);
   REQUIRE(submission);
   ::io_uring_prep_nop(submission);
 }
 
-// Prepares a NOP, for Loop::queue.
-auto prepare_nop(::io_uring_sqe* submission) noexcept -> void {
+// Prepares a no-op, for Loop::queue.
+auto prepare_no_op(::io_uring_sqe* submission) noexcept -> void {
   ::io_uring_prep_nop(submission);
 }
 
@@ -54,7 +54,7 @@ concept Queueable =
       loop.queue(std::move(prepare), std::move(handler));
     };
 
-using CannotThrowPrepare = decltype(&prepare_nop);
+using CannotThrowPrepare = decltype(&prepare_no_op);
 using MayThrowPrepare = decltype([](::io_uring_sqe*) {});
 using CannotThrow = decltype([](Completion) noexcept {});
 using MayThrow = decltype([](Completion) {});
@@ -85,13 +85,13 @@ auto run_until_idle(InOut<Loop> loop) -> void {
 }  // namespace
 
 TEST_CASE("Loop") {
-  SECTION("ShouldCompleteEachOperationGivenTwoNops") {
+  SECTION("ShouldCompleteEachOperationGivenTwoNoOps") {
     // Preconditions.
     Loop loop = make_loop();
     CountingOperation first;
     CountingOperation second;
-    submit_nop(Depend(first), InOut(loop));
-    submit_nop(Depend(second), InOut(loop));
+    submit_no_op(Depend(first), InOut(loop));
+    submit_no_op(Depend(second), InOut(loop));
 
     // Under Test.
     auto dispatched = loop.run_once();
@@ -114,7 +114,7 @@ TEST_CASE("Loop") {
         complete = [](Operation& operation, Completion) noexcept {
           auto& self = static_cast<RepeatingOperation&>(operation);
           if (++self.calls == 1) {
-            submit_nop(Depend(self), InOut(*self.loop_));
+            submit_no_op(Depend(self), InOut(*self.loop_));
           }
         };
       }
@@ -124,7 +124,7 @@ TEST_CASE("Loop") {
     };
     Loop loop = make_loop();
     RepeatingOperation operation{Depend(loop)};
-    submit_nop(Depend(operation), InOut(loop));
+    submit_no_op(Depend(operation), InOut(loop));
 
     // Under Test.
     auto first = loop.run_once();
@@ -160,14 +160,14 @@ TEST_CASE("Loop") {
     CHECK_THROWS_AS(loop.maybe_submission(Depend(operation)), std::logic_error);
   }
 
-  SECTION("ShouldCallCallerOwnedHandlerGivenNop") {
+  SECTION("ShouldCallCallerOwnedHandlerGivenNoOp") {
     // Preconditions.
     Loop loop = make_loop();
     std::vector<Completion> completions;
     HandlerOperation operation{[&](Completion completion) noexcept {
       completions.push_back(completion);
     }};
-    submit_nop(Depend(operation), InOut(loop));
+    submit_no_op(Depend(operation), InOut(loop));
 
     // Under Test.
     auto dispatched = loop.run_once();
@@ -178,11 +178,11 @@ TEST_CASE("Loop") {
     CHECK(completions[0].result == 0);
   }
 
-  SECTION("ShouldCallLoopOwnedHandlerOnceGivenNop") {
+  SECTION("ShouldCallLoopOwnedHandlerOnceGivenNoOp") {
     // Preconditions.
     Loop loop = make_loop();
     std::vector<Completion> completions;
-    REQUIRE(loop.queue(prepare_nop, [&](Completion completion) noexcept {
+    REQUIRE(loop.queue(prepare_no_op, [&](Completion completion) noexcept {
       completions.push_back(completion);
     }));
 
@@ -201,7 +201,7 @@ TEST_CASE("Loop") {
     // Preconditions.
     Loop loop = make_loop();
     auto captured = std::make_shared<int>(0);
-    REQUIRE(loop.queue(prepare_nop,
+    REQUIRE(loop.queue(prepare_no_op,
                        [captured](Completion) noexcept { ++*captured; }));
     REQUIRE(captured.use_count() == 2);
 
@@ -217,11 +217,11 @@ TEST_CASE("Loop") {
     // Preconditions.
     Loop loop = make_loop(1);
     int calls = 0;
-    REQUIRE(loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; }));
+    REQUIRE(loop.queue(prepare_no_op, [&](Completion) noexcept { ++calls; }));
 
     // Under Test.
     bool queued =
-        loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; });
+        loop.queue(prepare_no_op, [&](Completion) noexcept { ++calls; });
 
     // Postconditions.
     CHECK(queued);
@@ -234,10 +234,10 @@ TEST_CASE("Loop") {
     // Preconditions.
     // A disabled ring hands out entries but refuses to submit them.
     Loop loop = make_loop(1, IORING_SETUP_R_DISABLED);
-    REQUIRE(loop.queue(prepare_nop, [](Completion) noexcept {}));
+    REQUIRE(loop.queue(prepare_no_op, [](Completion) noexcept {}));
 
     // Under Test.
-    bool queued = loop.queue(prepare_nop, [](Completion) noexcept {});
+    bool queued = loop.queue(prepare_no_op, [](Completion) noexcept {});
 
     // Postconditions.
     CHECK_FALSE(queued);
@@ -250,7 +250,7 @@ TEST_CASE("Loop") {
     Loop loop = make_loop(128);
     int calls = 0;
     for (int i = 0; i < COUNT; ++i) {
-      REQUIRE(loop.queue(prepare_nop, [&](Completion) noexcept { ++calls; }));
+      REQUIRE(loop.queue(prepare_no_op, [&](Completion) noexcept { ++calls; }));
     }
 
     // Under Test.
@@ -269,7 +269,7 @@ TEST_CASE("Loop") {
     int calls = 0;
     // Each handler queues the next, three deep.
     auto queue_next = [&](this auto const& self) -> void {
-      REQUIRE(loop.queue(prepare_nop, [&, self](Completion) noexcept {
+      REQUIRE(loop.queue(prepare_no_op, [&, self](Completion) noexcept {
         if (++calls < 3) {
           self();
         }
