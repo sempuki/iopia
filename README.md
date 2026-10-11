@@ -26,6 +26,25 @@ bazel run //:hello   # print the liburing version iopia links
 Code targets C++26; flags come from `@lib//bazel:copts.bzl`. Put machine-local
 flags in an untracked `user.bazelrc`.
 
+## Sanitizers
+
+Run the tests under AddressSanitizer and UndefinedBehaviorSanitizer with
+Clang, which ships its own runtimes. Only iopia's sources are instrumented,
+and the tests link statically, because liburing's shared library doesn't link
+with sanitizer flags:
+
+```sh
+CC=clang CXX=clang++ bazel test //... \
+  --repo_env=CC=clang --repo_env=CXX=clang++ \
+  --build_tests_only --dynamic_mode=off \
+  --per_file_copt='iopia/.*@-fsanitize=address' \
+  --per_file_copt='iopia/.*@-fsanitize=undefined' \
+  --linkopt=-fsanitize=address --linkopt=-fsanitize=undefined
+```
+
+`--per_file_copt` splits its value at commas, so each sanitizer gets its own
+flag.
+
 ## Editor setup
 
 clangd needs a `compile_commands.json`. lib's `bazel/lsp_mirror.py` builds in
