@@ -288,9 +288,10 @@ TEST_CASE("Loop") {
 
   SECTION("ShouldReturnFromRunGivenHandlerCallsStop") {
     // Preconditions.
-    Loop loop = make_loop();
+    // The loop's destructor calls the handler once more.
     ::__kernel_timespec interval{.tv_sec = 0, .tv_nsec = 1'000'000};
     int calls = 0;
+    Loop loop = make_loop();
     // A multishot timeout with no count fires until it is cancelled.
     REQUIRE(loop.queue(
         [&](::io_uring_sqe* submission) noexcept {
