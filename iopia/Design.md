@@ -62,6 +62,9 @@ iopia follows the conventions in simon's
 nullable getters, one `public:`, `protected:` and `private:` section per class,
 and the rest.
 
+**Documents live beside their code.** A package's `Design.md`, any
+`Design.<topic>.md`, and its `Using.md` sit in the package's directory.
+
 **Code lives in the `iopia` package and the `iopia` namespace.** Headers are
 included from the repository root (`#include "iopia/ring.hpp"`), and
 implementation details live in `iopia::internal`. The gateway lives in the
@@ -352,6 +355,8 @@ that isn't thread-safe, which is one more reason to keep a ring and its
 completions on one thread until a later step decides otherwise.
 
 ### Gateway
+
+This section moves to `gateway/Design.md` when the `gateway` package exists.
 
 The gateway moves messages along three kinds of path.
 

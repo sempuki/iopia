@@ -5,9 +5,10 @@ both modeled on the C++ standard's designs and built on one ring and one
 completion protocol. On top of them, a gateway that moves messages between
 local publish-subscribe systems, such as iceoryx2, and the network.
 
-How to use iopia is in [Using.md](Using.md). The design, its decisions and
-the plan are in [Design.md](Design.md), and
-[Design.coroutine.md](Design.coroutine.md) explains the coroutine front-end.
+How to use iopia is in [iopia/Using.md](iopia/Using.md). The design, its
+decisions and the plan are in [iopia/Design.md](iopia/Design.md), and
+[iopia/Design.coroutine.md](iopia/Design.coroutine.md) explains the coroutine
+front-end.
 
 ## Build
 
