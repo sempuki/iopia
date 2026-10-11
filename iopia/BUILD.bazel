@@ -64,6 +64,35 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "task",
+    hdrs = ["task.hpp"],
+    copts = COPTS,
+    deps = [
+        ":argument",
+        ":io_error",
+        ":loop",
+        "@lib//base:core",
+        "@lib//base:status",
+    ],
+)
+
+cc_library(
+    name = "awaitable",
+    hdrs = ["awaitable.hpp"],
+    copts = COPTS,
+    deps = [
+        ":argument",
+        ":io_error",
+        ":loop",
+        ":operation",
+        ":ring",
+        "//3rd_party:liburing",
+        "@lib//base:core",
+        "@lib//base:status",
+    ],
+)
+
 [cc_test(
     name = test + "_test",
     size = "small",
@@ -72,8 +101,10 @@ cc_library(
     deps = [
         ":" + test,
         "@lib//base:testing",
-    ],
-) for test in [
-    "loop",
-    "ring",
+    ] + extra_deps,
+) for test, extra_deps in [
+    ("awaitable", [":task"]),
+    ("loop", []),
+    ("ring", []),
+    ("task", [":awaitable"]),
 ]]
