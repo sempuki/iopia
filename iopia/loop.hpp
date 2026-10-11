@@ -21,7 +21,7 @@
 #include "iopia/operation.hpp"
 #include "iopia/ring.hpp"
 
-// The event loop: it submits operations and calls each one back when its
+// The event loop. It submits operations and calls each one back when its
 // completions arrive.
 namespace iopia {
 

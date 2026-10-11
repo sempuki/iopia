@@ -40,8 +40,8 @@ class MemoryFile final {
   std::int32_t file_ = -1;
 };
 
-auto nop(Depend<Loop> loop) -> Task<std::expected<void, lib::Status>> {
-  co_return co_await Nop{loop};
+auto no_op(Depend<Loop> loop) -> Task<std::expected<void, lib::Status>> {
+  co_return co_await NoOp{loop};
 }
 
 auto read(Depend<Loop> loop, std::int32_t file, std::span<std::byte> buffer)
@@ -65,19 +65,19 @@ auto timeout(Depend<Loop> loop, std::chrono::nanoseconds duration)
   co_return co_await Timeout{loop, duration};
 }
 
-auto prepare_nop(::io_uring_sqe* submission) noexcept -> void {
+auto prepare_no_op(::io_uring_sqe* submission) noexcept -> void {
   ::io_uring_prep_nop(submission);
 }
 
 }  // namespace
 
 TEST_CASE("Awaitable") {
-  SECTION("ShouldSucceedGivenNop") {
+  SECTION("ShouldSucceedGivenNoOp") {
     // Preconditions.
     Loop loop = make_loop();
 
     // Under Test.
-    auto result = run(InOut(loop), nop(Depend(loop)));
+    auto result = run(InOut(loop), no_op(Depend(loop)));
 
     // Postconditions.
     REQUIRE(result);
@@ -136,10 +136,10 @@ TEST_CASE("Awaitable") {
     // Preconditions.
     // A disabled ring hands out entries but refuses to submit them.
     Loop loop = make_loop(1, IORING_SETUP_R_DISABLED);
-    REQUIRE(loop.queue(prepare_nop, [](Completion) noexcept {}));
+    REQUIRE(loop.queue(prepare_no_op, [](Completion) noexcept {}));
 
     // Under Test.
-    auto result = run(InOut(loop), nop(Depend(loop)));
+    auto result = run(InOut(loop), no_op(Depend(loop)));
 
     // Postconditions.
     REQUIRE(result);

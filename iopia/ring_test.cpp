@@ -11,7 +11,7 @@
 namespace iopia {
 
 TEST_CASE("Ring") {
-  SECTION("ShouldCompleteNopWithItsUserDataGivenOneSubmission") {
+  SECTION("ShouldCompleteNoOpWithItsUserDataGivenOneSubmission") {
     // Preconditions.
     auto ring = Ring::make(8);
     REQUIRE(ring);

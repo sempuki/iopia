@@ -20,11 +20,11 @@
 #include "iopia/operation.hpp"
 #include "iopia/ring.hpp"
 
-// io_uring operations to co_await from a Task: Nop, Read, Write and Timeout.
+// The io_uring operations a Task can co_await, NoOp, Read, Write and Timeout.
 namespace iopia {
 namespace internal {
 
-// The operation an awaitable is: it prepares its submission when the
+// The operation behind every awaitable. It prepares its submission when the
 // coroutine suspends, and resumes the coroutine with the completion's result.
 // It lives in the awaiting coroutine's frame. If the loop can't hand out an
 // entry, the coroutine doesn't suspend, and the result is -EBUSY.
@@ -68,9 +68,9 @@ class Awaitable : public Operation {
 }  // namespace internal
 
 // Completes without doing anything.
-class Nop final : public internal::Awaitable<Nop> {
+class NoOp final : public internal::Awaitable<NoOp> {
  public:
-  explicit Nop(Depend<Loop> loop) : Awaitable{loop} {}
+  explicit NoOp(Depend<Loop> loop) : Awaitable{loop} {}
 
   auto prepare(::io_uring_sqe* submission) noexcept -> void {
     ::io_uring_prep_nop(submission);
@@ -78,7 +78,7 @@ class Nop final : public internal::Awaitable<Nop> {
 
   auto await_resume() const -> std::expected<void, lib::Status> {
     if (result_ < 0) [[unlikely]] {
-      return Failure{raise_io_error(result_, "nop")};
+      return Failure{raise_io_error(result_, "no-op")};
     }
     return {};
   }

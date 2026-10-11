@@ -19,7 +19,7 @@
 // One io_uring, its submission and completion queues, used from one thread.
 namespace iopia {
 
-// What the kernel reports for one finished submission. It is a copy of the
+// The kernel's report of one finished submission. It is a copy of the
 // completion queue entry, so the entry can go back to the kernel before anyone
 // handles it.
 struct Completion final {
