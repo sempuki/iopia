@@ -308,9 +308,58 @@ completions that keeps arriving can't hold `run_once()` forever.
 
 ### Coroutine front-end
 
-`Task<T>` is a lazy coroutine type, and each io_uring operation is an
-awaitable. The awaitable prepares its submission in `await_suspend`, when the
-coroutine's handle is known, and the completion resumes the coroutine.
+`Task<T>` (`iopia/task.hpp`) is a lazy coroutine that returns a `T`. It starts
+when it is awaited, or when `run(InOut(loop), task)` is given it, and it is
+move-only. Each io_uring operation is an awaitable (`iopia/awaitable.hpp`):
+`Nop`, `Read`, `Write` and `Timeout`.
+
+```cpp
+auto read_header(Depend<Loop> loop, std::int32_t file,
+                 std::span<std::byte> header)
+    -> Task<std::expected<std::uint32_t, lib::Status>> {
+  co_return co_await Read{loop, file, header, 0};
+}
+
+auto bytes = run(InOut(loop), read_header(Depend(loop), file, header));
+```
+
+**An awaitable is the completion protocol's operation.** Each derives from
+`Operation` through `internal::Awaitable`, so it lives in the awaiting
+coroutine's frame, at a fixed address, for as long as the kernel holds it.
+`await_suspend` takes an entry from the loop and prepares it. The completion
+stores the result and resumes the coroutine, from inside the loop's dispatch.
+`await_resume` turns a negative result into a `lib::Status` through
+`raise_io_error`. A timeout that expires completes with `-ETIME`, which
+`Timeout` treats as success.
+
+If the loop can't hand out an entry, `await_suspend` returns `false`, the
+coroutine continues without suspending, and the awaitable reports `-EBUSY`
+as `IoError::BUSY`.
+
+**A task resumes its awaiter in one of two ways.** Starting a child task
+resumes it from the parent's `await_suspend`.
+
+| The child | What happens |
+|---|---|
+| finishes before it suspends | Its final suspend returns to the parent's `await_suspend`, which returns `false`, and the parent continues. |
+| suspends on an operation, and finishes later | Its final suspend transfers to the parent (symmetric transfer). |
+
+The first case keeps a loop over children that never suspend from growing the
+stack. Symmetric transfer alone would do that only where the compiler makes
+it a tail call, and GCC 16 doesn't at `-O0`, which is Bazel's default build.
+A test of a million such children overflowed the stack there.
+
+**`run()` drives one task to completion.** It resumes the task, then calls
+`loop.run_once()` until the task is done, retrying an interrupted wait and
+returning any other error. A task that waits on nothing the loop knows about
+would never finish, so `run()` checks that something is pending each time.
+
+**Tasks don't throw.** `unhandled_exception` calls `std::terminate`, as a
+handler's escaping exception does.
+
+**A task suspended on an operation must not be destroyed.** The kernel holds
+the address of the awaitable in its frame. Until cancellation (step 7) can
+cancel the operation first, a task that is suspended must be run to the end.
 
 The coroutine front-end uses only `<coroutine>`, so a program that uses it
 compiles no sender code.
@@ -407,6 +456,8 @@ network protocol between gateways.
 | The loop reaps completions in batches of 32, copied out before dispatch. | One store to the shared head per batch instead of per completion, and the slots are free again before handlers run. |
 | A full submission queue is submitted and retried once; null means it still failed. | Most programs never see a full queue, and callers keep one simple contract: null means try later. |
 | `run()` returns when nothing is pending or a handler calls `stop()`. | It is what `sync_wait` and a coroutine's top-level run will need, without a timeout API yet. |
+| `Task<T>` is iopia's own coroutine type and doesn't await senders. | Coroutine users compile no sender code, per "you pay only for what you use". This settles whether to follow `std::execution::task`; step 6 bridges the two front-ends. |
+| A child task that finishes before suspending returns to its parent's `await_suspend`. | Symmetric transfer isn't a tail call under GCC at `-O0`, and a loop over such children would overflow the stack. |
 | Handlers and prepare functions are `noexcept`, checked at compile time. | The loop never has to recover from a dispatch that stopped partway, which keeps batched reaping simple. We may revisit this later. |
 | iopia writes its own coroutine task, sender concepts and algorithms, modeled on the standard's. | Building them is how we learn the standard, which matters more here than conformance or a shorter list of things to write. This settles the earlier question of our own concepts or stdexec's. |
 | The gateway is a separate package, `gateway`, on the library's public interfaces. | The library never depends on iceoryx2, and the gateway tests the interfaces the way any user would. |
@@ -415,11 +466,6 @@ network protocol between gateways.
 
 ## Open questions
 
-- **Does `Task<T>` follow `std::execution::task`?** C++26's coroutine task
-  type awaits senders. Modeling `Task<T>` on it would leave iopia one set of
-  operations, as senders, and drop its own awaitables. It would also make
-  coroutine users compile sender code, against "you pay only for what you
-  use". Decide before step 4.
 - **The network protocol between gateways:** a framing of iopia's own over TCP
   or UDP, or an existing one such as Zenoh's or RTPS. Decide before step 9.
 - **How the gateway speaks DDS:** implement RTPS on io_uring so the ring owns
@@ -428,6 +474,9 @@ network protocol between gateways.
 - **Registering iceoryx2's shared memory as a fixed buffer:** whether iceoryx2
   exposes its segments' addresses and sizes, and whether it remaps them while
   the gateway runs.
+- **Destroying a suspended task:** whether destroying a task that is
+  suspended on an operation should cancel the operation and wait for its
+  completion, once cancellation exists.
 - **Cancellation:** how a coroutine and a stop token each map to
   `IORING_OP_ASYNC_CANCEL`.
 
