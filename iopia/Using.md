@@ -1,6 +1,6 @@
 # Using iopia
 
-This guide shows how to use iopia's pieces. [README.md](README.md) covers
+This guide shows how to use iopia's pieces. [README.md](../README.md) covers
 building it, and [Design.md](Design.md) explains why it works the way it does.
 
 ## Choosing a layer
