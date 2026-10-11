@@ -94,18 +94,21 @@ class Ring final {
 
   // Copies as many ready completions as fit into `into`, oldest first, and
   // returns their entries to the kernel together. Returns how many it copied.
-  // It never waits. It enters the kernel only when no completion is ready and
-  // the kernel is holding some back, after an overflow or with task work
-  // waiting.
+  // It never waits or enters the kernel, so completions the kernel holds back
+  // after an overflow wait for the next submit_and_wait().
   template <std::size_t Count>
   auto take_completions(Out<std::array<Completion, Count>> into)
       -> std::uint32_t {
     CHECK_PRECONDITION(ring_);
-    std::array<::io_uring_cqe*, Count> entries;
-    std::uint32_t taken = ::io_uring_peek_batch_cqe(
-        ring_.get(), entries.data(), static_cast<std::uint32_t>(Count));
-    for (std::uint32_t index = 0; index < taken; ++index) {
-      (*into)[index] = copy(*entries[index]);
+    std::uint32_t taken = 0;
+    std::uint32_t head = 0;
+    ::io_uring_cqe* entry = nullptr;
+    // A liburing macro, so it can't be qualified with ::.
+    io_uring_for_each_cqe(ring_.get(), head, entry) {
+      if (taken == Count) {
+        break;
+      }
+      (*into)[taken++] = copy(*entry);
     }
     ::io_uring_cq_advance(ring_.get(), taken);
     return taken;
