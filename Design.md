@@ -69,9 +69,9 @@ depends on iceoryx2.
 **C symbols are written with the global namespace qualifier,**
 `::io_uring_get_sqe(...)` and `::io_uring_sqe*`, so a reader can tell
 liburing's C API from iopia's own names. Macros such as `IORING_SETUP_SQPOLL`
-and `EINVAL` can't be qualified and stay as they are. Where liburing offers a
-function and a macro for the same job, iopia uses the function, so its name
-can be qualified: `::io_uring_peek_batch_cqe`, not `io_uring_for_each_cqe`.
+and `EINVAL` can't be qualified and stay as they are. A function-like macro,
+such as `io_uring_for_each_cqe`, gets a comment saying it's a macro, so the
+missing `::` doesn't look like a mistake.
 
 **`Out`, `InOut` and `Depend` are written without `lib::`.** They are lib's
 parameter vocabulary, and the project has only one of each.
@@ -158,9 +158,8 @@ pointer into the completion queue. `wait()` and `maybe_completion()` copy one
 completion and return its entry to the kernel at once.
 `take_completions(Out(batch))` copies as many ready completions as fit in the
 array `batch` and returns their entries together, with one
-`io_uring_cq_advance`. It reads them with `io_uring_peek_batch_cqe`, which
-enters the kernel only when no completion is ready and the kernel is holding
-some back (after an overflow, or with task work waiting).
+`io_uring_cq_advance`. It reads the queue with `io_uring_for_each_cqe` and
+never enters the kernel.
 
 ### Completion protocol
 
