@@ -103,7 +103,7 @@ class Ring final {
     std::uint32_t taken = 0;
     std::uint32_t head = 0;
     ::io_uring_cqe* entry = nullptr;
-    // A liburing macro, so it can't be qualified with ::.
+    // A liburing macro.
     io_uring_for_each_cqe(ring_.get(), head, entry) {
       if (taken == Count) {
         break;
