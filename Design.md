@@ -7,7 +7,9 @@ messages between local publish-subscribe systems, such as iceoryx2, and the
 network.
 
 This document records the architecture, the decisions behind it, and the
-roadmap. Update it when a decision changes.
+roadmap. Update it when a decision changes. How to use iopia is in
+[Using.md](Using.md), and how io_uring maps onto coroutines is in
+[Design.coroutine.md](Design.coroutine.md).
 
 ## Goals
 
@@ -78,7 +80,8 @@ parameter vocabulary, and the project has only one of each.
 `iopia/argument.hpp` declares them in the `iopia` namespace, as simon's
 `core/argument.hpp` does.
 
-**Integers have fixed widths:** `std::uint32_t`, not `unsigned`. Sizes and
+**Integers have fixed widths.** iopia writes `std::uint32_t` where C would
+write `unsigned`. Sizes and
 indices into containers stay `std::size_t`. liburing's `unsigned` parameters
 take a `std::uint32_t` without a cast, since the two are the same type on
 Linux. A value a C call returns, such as liburing's `int` results, keeps its
@@ -152,12 +155,9 @@ to a new address safely.
 We keep the heap for the simpler move. Goal 3 argues for the value instead, so
 measure the hot calls before deciding to change it.
 
-`maybe_submission()` returns the next free submission queue entry, or null when
-the queue is full. Completions come out as copies, so no caller holds a
-pointer into the completion queue. `wait()` and `maybe_completion()` copy one
-completion and return its entry to the kernel at once.
-`take_completions(Out(batch))` copies as many ready completions as fit in the
-array `batch` and returns their entries together, with one
+**Completions leave the ring as copies.** No caller holds a pointer into the
+completion queue, so an entry can go back to the kernel before anyone handles
+it. `take_completions` copies a batch and returns all its entries with one
 `io_uring_cq_advance`. It reads the queue with `io_uring_for_each_cqe` and
 never enters the kernel.
 
@@ -180,16 +180,7 @@ timeout) completes several times, and every completion but the last has
 derives from `Operation`, sets `complete` to a `noexcept` function that casts
 the `Operation&` back to its own type, and adds whatever state it needs.
 
-```cpp
-struct CountingOperation final : Operation {
-  CountingOperation() {
-    complete = [](Operation& operation, Completion) noexcept {
-      ++static_cast<CountingOperation&>(operation).calls;
-    };
-  }
-  int calls = 0;
-};
-```
+Using.md shows an operation type.
 
 #### Handlers
 
@@ -207,23 +198,12 @@ takes handlers of any size, and makes one indirect call per completion. It
 can be neither copied nor moved, so it can't leave the address the kernel
 holds. Both front-ends build on this kind.
 
-```cpp
-HandlerOperation operation{[&](Completion completion) noexcept { ... }};
-::io_uring_prep_nop(loop.maybe_submission(Depend(operation)));
-```
-
 **The loop owns it.** `loop.queue(prepare, handler)` takes a function that
 prepares the submission queue entry and a handler to call with each
 completion. The loop stores the handler in a node of its own, a
 `HandlerNode` holding a `std::move_only_function<void(Completion) noexcept>`,
 and returns the node to a free list after the last completion. The caller has
 nothing to keep alive.
-
-```cpp
-bool queued = loop.queue(
-    [](::io_uring_sqe* submission) noexcept { ::io_uring_prep_nop(submission); },
-    [](Completion completion) noexcept { ... });
-```
 
 | | Caller-owned | Loop-owned |
 |---|---|---|
@@ -259,25 +239,16 @@ handed submission queue entries to whose last completion hasn't arrived. It
 can be neither copied nor moved, because its loop-owned nodes and the
 operations that resubmit through it hold its address.
 
-- `maybe_submission(Depend(operation))` returns the next free submission
-  queue entry with its `user_data` set to the operation's address. `Depend`
-  marks that the loop keeps a reference that can dangle. If the queue is
-  full, it submits what the queue holds and tries once more. It returns null
-  only if that submit fails (for example with `-EBUSY` while the kernel holds
-  completions back) or the queue is still full.
-- `queue(prepare, handler)` does the same for a loop-owned handler, and
-  returns false when the queue is full.
-- `run_once()` submits what is prepared and waits for at least one completion,
-  in one system call (`io_uring_submit_and_wait`). Then it calls the
-  operation of every completion that is ready, and returns how many it called.
-  With nothing pending it returns 0 without waiting. A handler may submit
-  more operations; they go out on the next `run_once()`.
-- `run()` calls `run_once()` until nothing is pending or a handler calls
-  `stop()`. It retries an interrupted wait (`-EINTR`) and returns any other
-  error at once. `stop()` affects only the `run()` in progress, so the next
-  `run()` starts fresh.
-- A completion whose `user_data` is 0 has no operation, and fails a contract
-  check.
+Using.md lists its calls. Three of their behaviors are decisions.
+
+- **A full submission queue is submitted and retried once.** Most programs
+  never see a full queue, and a caller has one rule to follow: a null entry,
+  or `false` from `queue`, means try again later.
+- **`run()` returns when nothing is pending or a handler calls `stop()`.** It
+  retries a wait a signal interrupted (`-EINTR`), and returns any other error.
+  `stop()` affects only the `run()` in progress.
+- **A completion whose `user_data` is 0 has no operation,** and fails a
+  contract check.
 
 **Destroying a loop cancels and drains what is pending.** Tearing down the
 ring with operations pending would mean their completions are never reaped,
@@ -308,20 +279,10 @@ completions that keeps arriving can't hold `run_once()` forever.
 
 ### Coroutine front-end
 
-`Task<T>` (`iopia/task.hpp`) is a lazy coroutine that returns a `T`. It starts
-when it is awaited, or when `run(InOut(loop), task)` is given it, and it is
-move-only. Each io_uring operation is an awaitable (`iopia/awaitable.hpp`):
-`Nop`, `Read`, `Write` and `Timeout`.
-
-```cpp
-auto read_header(Depend<Loop> loop, std::int32_t file,
-                 std::span<std::byte> header)
-    -> Task<std::expected<std::uint32_t, lib::Status>> {
-  co_return co_await Read{loop, file, header, 0};
-}
-
-auto bytes = run(InOut(loop), read_header(Depend(loop), file, header));
-```
+`Task<T>` (`iopia/task.hpp`) is a lazy coroutine, and each io_uring operation
+is an awaitable (`iopia/awaitable.hpp`). Using.md shows how to write and run
+tasks. [Design.coroutine.md](Design.coroutine.md) explains how io_uring's
+concepts map onto C++ coroutines, and the choices behind this section.
 
 **An awaitable is the completion protocol's operation.** Each derives from
 `Operation` through `internal::Awaitable`, so it lives in the awaiting
@@ -482,14 +443,14 @@ network protocol between gateways.
 
 ## Roadmap
 
-1. **Ring.** `Ring::make`, move-only ownership, and a test that submits a NOP
-   and reaps its completion.
+1. **Ring.** `Ring::make`, move-only ownership, and a test that submits a
+   no-op and reaps its completion.
 2. **Completion protocol.** The operation type, `user_data` dispatch, and
    `run_once()`.
 3. **Event loop.** Batched reaping, a full submission queue, and `run()` with
    `stop()`.
-4. **Coroutine front-end.** `Task<T>`, and awaitables for nop, read, write and
-   timeout.
+4. **Coroutine front-end.** `Task<T>`, and awaitables for no-op, read, write
+   and timeout.
 5. **Sender front-end.** iopia's sender concepts, a scheduler, the same
    operations as senders, and the first algorithms (`then`, `sync_wait`).
 6. **Bridges.** Awaiting a sender inside a `Task`, and a `Task` as a sender.
