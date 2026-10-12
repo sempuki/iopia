@@ -61,6 +61,38 @@ returns. Whoever holds a handle decides when the coroutine continues. In
 iopia, the event loop holds the handles of stopped coroutines, indirectly,
 through `user_data`.
 
+### Parents and children
+
+When one task `co_await`s another task, the awaiting task is the **parent**
+and the awaited task is the **child**.
+
+```cpp
+auto child(Depend<Loop> loop) -> Task<std::int32_t> {
+  co_await Read{loop, file, buffer, 0};        // may stop on io_uring
+  co_return 7;
+}
+
+auto parent(Depend<Loop> loop) -> Task<std::int32_t> {
+  std::int32_t value = co_await child(loop);   // the parent awaits the child
+  co_return value * 2;
+}
+
+run(InOut(loop), parent(Depend(loop)));        // run() starts the top task
+```
+
+```
+run()            drives the top task, which has no parent
+ └─ parent       co_await child(loop)
+     └─ child    co_await Read{...}, which stops on io_uring
+```
+
+Tasks are lazy, so the parent starts the child. The child's promise keeps the
+parent's handle as its **continuation**, and when the child finishes it uses
+that handle to get the parent running again. A child can be a parent too, so
+the chain can be any depth. The top task's continuation is
+`std::noop_coroutine()`, a handle whose `resume()` does nothing, so when the
+top task finishes, control returns to `run()`.
+
 ## The mapping
 
 | io_uring | Coroutine | iopia |
