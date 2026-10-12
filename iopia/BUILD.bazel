@@ -93,6 +93,7 @@ cc_library(
     deps = [
         "//3rd_party:liburing",
         "//core:argument",
+        ":io_error",
         ":loop",
         ":operation",
         ":request",
@@ -122,6 +123,7 @@ cc_library(
     deps = [
         "//3rd_party:liburing",
         "//core:argument",
+        ":io_error",
         ":loop",
         ":operation",
         ":request",

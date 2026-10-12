@@ -11,6 +11,7 @@
 
 #include "base/core.hpp"
 #include "core/argument.hpp"
+#include "iopia/io_error.hpp"
 #include "iopia/loop.hpp"
 #include "iopia/operation.hpp"
 #include "iopia/request.hpp"
@@ -25,7 +26,7 @@ namespace internal {
 // The operation state of a request sender. start() takes an entry and prepares
 // the request; the completion turns the result into set_value or set_error, or
 // set_stopped when the request was cancelled. If the loop can't hand out an
-// entry, start() completes at once with IoError::BUSY.
+// entry, start() completes at once with set_error and IoError::BUSY.
 template <typename RequestType, typename ReceiverType>
 class RequestOperation final : public Operation {
  public:
@@ -34,9 +35,9 @@ class RequestOperation final : public Operation {
 
   RequestOperation(Depend<Loop> loop, RequestType request,
                    ReceiverType receiver)
-      : request_{std::move(request)},
-        receiver_{std::move(receiver)},
-        loop_{loop.get()} {
+      : loop_{loop.get()},
+        request_{std::move(request)},
+        receiver_{std::move(receiver)} {
     complete = [](Operation& operation, Completion completion) noexcept {
       static_cast<RequestOperation&>(operation).finish(completion.result);
     };
@@ -47,7 +48,7 @@ class RequestOperation final : public Operation {
   auto start() noexcept -> void {
     ::io_uring_sqe* submission = loop_->try_take_submission(Depend(*this));
     if (!submission) [[unlikely]] {
-      finish(-EBUSY);
+      std::move(receiver_).set_error(raise_queue_full());
       return;
     }
     request_.prepare(submission);
@@ -69,9 +70,10 @@ class RequestOperation final : public Operation {
     }
   }
 
+  // Fields go by lifetime, meaning, cache heat, then descending size.
+  Loop* loop_ = nullptr;
   RequestType request_;
   ReceiverType receiver_;
-  Loop* loop_ = nullptr;
 };
 
 }  // namespace internal

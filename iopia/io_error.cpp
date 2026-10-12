@@ -63,4 +63,9 @@ auto raise_io_error(int result, std::string_view call) -> Status {
                                 std::generic_category().message(error), error));
 }
 
+auto raise_queue_full() -> Status {
+  return lib::raise(IoError::BUSY,
+                    "try_take_submission: no free submission queue entry");
+}
+
 }  // namespace iopia

@@ -741,7 +741,7 @@ Changes where the frame comes from, and leaves the sequence as it is.
 
 | io_uring | Coroutine | `std::execution` | iopia |
 |---|---|---|---|
-| Prepare an SQE | `await_suspend` | `start` | `internal::Awaitable::await_suspend` takes an SQE and prepares it |
+| Prepare an SQE | `await_suspend` | `start` | `internal::AwaitableOperation::await_suspend` takes an SQE and prepares it |
 | `user_data` | The awaiter's address | The operation state's address | Each awaiter is an `Operation`, and `user_data` points at it |
 | `io_uring_enter` | Code outside any coroutine | `sync_wait` | `run()` and `Loop::run_once()` |
 | A CQE | `resume()` | Calling the receiver | `Operation::complete` stores `res` and calls `resume()` |

@@ -36,6 +36,10 @@ using Failure = std::unexpected<Status>;
 // The status for `result`, a negative errno that liburing's `call` returned.
 auto raise_io_error(int result, std::string_view call) -> Status;
 
+// The status for a submission queue with no free entry, which is
+// IoError::BUSY. No liburing call failed, so there is no errno.
+auto raise_queue_full() -> Status;
+
 }  // namespace iopia
 
 // Messages for each IoError, defined in io_error.cpp.
