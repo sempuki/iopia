@@ -19,7 +19,7 @@ Any function whose body uses `co_await`, `co_yield` or `co_return` is one.
 | Promise | An object of the type `promise_type`, which the return type names. The compiler calls its member functions at fixed points, and it is where a result is kept. |
 | Handle | `std::coroutine_handle<>`, a pointer to a frame. `resume()` continues the coroutine, `destroy()` frees the frame, and `done()` says whether it has finished. |
 | Awaiter | The object `co_await` works on. Its three member functions decide whether to stop, what to do on stopping, and what value the `co_await` produces. |
-| Return object | What the caller gets back from the call. iopia's is `Task<T>`, which owns the handle. |
+| Return object | What the caller gets back from the call. Its type, the coroutine's return type, names the promise type, so it decides how the coroutine behaves. iopia's is `Task<T>`, which owns the handle. |
 
 ### What `co_await` does
 
@@ -115,8 +115,8 @@ Each section lists the options, what each trades, and what iopia does today.
 
 | Option | Trade |
 |---|---|
-| **Pass it in:** `Read{Depend(loop), ...}` (iopia today) | Explicit and simple, and an awaiter works in any coroutine type. Every call names the loop. |
-| **Keep it in the task's promise.** `run()` gives the top task a loop, each child inherits it, and `await_suspend` reads it from the awaiting coroutine's promise. `std::execution::task` does this with its scheduler. | Calls read `co_await Read{file, buffer, 0}`. The awaiter only works inside iopia's `Task`, and the promise grows by a pointer. |
+| **Pass it in:** `Read{Depend(loop), ...}` (iopia today) | Explicit and simple. `await_suspend` takes a `std::coroutine_handle<>` and never looks at the promise, so an awaiter works in a coroutine of any return type, such as iopia's `Task`, `std::generator` or another library's task. Every call names the loop. |
+| **Keep it in the task's promise.** `run()` gives the top task a loop, each child inherits it, and `await_suspend` reads it from the awaiting coroutine's promise. `std::execution::task` does this with its scheduler. | Calls read `co_await Read{file, buffer, 0}`. `await_suspend` must name iopia's promise type to reach the loop, so the awaiter only works inside iopia's `Task`, and the promise grows by a pointer. |
 | **A thread-local current loop.** | Shortest calls. Hidden state, and wrong as soon as a task touches two loops. |
 
 ### 2. Lazy or eager tasks
