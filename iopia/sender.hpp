@@ -12,7 +12,8 @@
 
 #include "base/core.hpp"
 #include "base/status.hpp"
-#include "iopia/argument.hpp"
+#include "core/argument.hpp"
+#include "core/status.hpp"
 #include "iopia/io_error.hpp"
 #include "iopia/loop.hpp"
 
@@ -39,12 +40,12 @@ concept ReceiverOfVoid = requires(ReceiverType&& receiver) {
 }  // namespace internal
 
 // Takes the completion of a sender of ValueType: set_value with the value,
-// set_error with a lib::Status, or set_stopped. Exactly one of them is called,
+// set_error with a Status, or set_stopped. Exactly one of them is called,
 // once, on an rvalue receiver, and none can throw.
 template <typename ReceiverType, typename ValueType>
 concept Receiver =
     std::move_constructible<ReceiverType> &&
-    requires(ReceiverType&& receiver, lib::Status error) {
+    requires(ReceiverType&& receiver, Status error) {
       { std::move(receiver).set_error(std::move(error)) } noexcept;
       { std::move(receiver).set_stopped() } noexcept;
     } &&
@@ -169,7 +170,7 @@ class ThenReceiver final {
     }
   }
 
-  auto set_error(lib::Status error) && noexcept -> void {
+  auto set_error(Status error) && noexcept -> void {
     std::move(receiver_).set_error(std::move(error));
   }
 
@@ -235,7 +236,7 @@ namespace internal {
 // Where sync_wait's receiver puts the completion.
 template <typename ValueType>
 struct SyncWaitState final {
-  std::optional<std::expected<ValueType, lib::Status>> result;
+  std::optional<std::expected<ValueType, Status>> result;
 };
 
 template <typename ValueType>
@@ -249,7 +250,7 @@ class SyncWaitReceiver final {
     state_->result.emplace(std::in_place, std::forward<ValueTypes>(values)...);
   }
 
-  auto set_error(lib::Status error) && noexcept -> void {
+  auto set_error(Status error) && noexcept -> void {
     state_->result.emplace(std::unexpect, std::move(error));
   }
 
@@ -271,7 +272,7 @@ template <Sender SenderType>
   requires SenderTo<SenderType,
                     internal::SyncWaitReceiver<value_of_t<SenderType>>>
 auto sync_wait(InOut<Loop> loop, SenderType&& sender)
-    -> std::expected<value_of_t<SenderType>, lib::Status> {
+    -> std::expected<value_of_t<SenderType>, Status> {
   using ValueType = value_of_t<SenderType>;
   internal::SyncWaitState<ValueType> state;
   auto operation = std::forward<SenderType>(sender).connect(

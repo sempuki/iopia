@@ -17,7 +17,7 @@ thread that made them.
 
 ## Errors
 
-A function that can fail returns `std::expected<T, lib::Status>`. liburing's
+A function that can fail returns `std::expected<T, Status>`. liburing's
 negative `errno` values become one of these `IoError` conditions.
 
 | Condition | errno |
@@ -52,7 +52,7 @@ move-only.
 ```cpp
 auto read_header(Depend<Loop> loop, std::int32_t file,
                  std::span<std::byte> header)
-    -> Task<std::expected<std::uint32_t, lib::Status>> {
+    -> Task<std::expected<std::uint32_t, Status>> {
   co_return co_await Read{loop, file, header, 0};
 }
 
@@ -77,12 +77,12 @@ auto ring = Ring::make(64);
 if (!ring) { /* ring.error() */ }
 Loop loop{*std::move(ring)};
 
-std::expected<std::uint32_t, lib::Status> size =
+std::expected<std::uint32_t, Status> size =
     run(InOut(loop), header_size(Depend(loop), file));
 ```
 
 A task whose value is itself a `std::expected` comes back nested, as
-`std::expected<std::expected<T, lib::Status>, lib::Status>`. The outer one
+`std::expected<std::expected<T, Status>, Status>`. The outer one
 reports the loop, and the inner one the operation.
 
 ### Awaitables
@@ -91,10 +91,10 @@ Each awaitable is one io_uring operation. Construct it in the `co_await`.
 
 | Awaitable | Result |
 |---|---|
-| `NoOp{loop}` | `std::expected<void, lib::Status>` |
-| `Read{loop, file, buffer, offset}` | `std::expected<std::uint32_t, lib::Status>`, the bytes read |
-| `Write{loop, file, buffer, offset}` | `std::expected<std::uint32_t, lib::Status>`, the bytes written |
-| `Timeout{loop, duration}` | `std::expected<void, lib::Status>`, once `duration` has passed |
+| `NoOp{loop}` | `std::expected<void, Status>` |
+| `Read{loop, file, buffer, offset}` | `std::expected<std::uint32_t, Status>`, the bytes read |
+| `Write{loop, file, buffer, offset}` | `std::expected<std::uint32_t, Status>`, the bytes written |
+| `Timeout{loop, duration}` | `std::expected<void, Status>`, once `duration` has passed |
 
 An offset of -1 reads or writes at the file's current position. A buffer must
 stay valid until the `co_await` returns.
@@ -120,7 +120,7 @@ error.
 
 ```cpp
 std::array<std::byte, 64> buffer;
-std::expected<std::uint32_t, lib::Status> bytes =
+std::expected<std::uint32_t, Status> bytes =
     sync_wait(InOut(loop), ReadSender{Depend(loop), file, std::span{buffer}, 0});
 ```
 
@@ -173,7 +173,7 @@ three completions, each `noexcept` and called on an rvalue.
 ```cpp
 struct PrintBytes final {
   auto set_value(std::uint32_t bytes) && noexcept -> void { std::println("{}", bytes); }
-  auto set_error(lib::Status error) && noexcept -> void { std::println("{}", error.message()); }
+  auto set_error(Status error) && noexcept -> void { std::println("{}", error.message()); }
   auto set_stopped() && noexcept -> void { std::println("stopped"); }
 };
 

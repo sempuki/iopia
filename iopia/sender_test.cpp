@@ -1,6 +1,7 @@
 // Copyright 2026 -- CONTRIBUTORS. See LICENSE.
 
 #include "iopia/sender.hpp"
+#include "core/status.hpp"
 
 #include <cstdint>
 #include <string>
@@ -21,7 +22,7 @@ auto make_loop() -> Loop {
 // A receiver of std::int32_t that keeps what it was given.
 struct KeepingReceiver final {
   auto set_value(std::int32_t value) && noexcept -> void { *kept = value; }
-  auto set_error(lib::Status) && noexcept -> void {}
+  auto set_error(Status) && noexcept -> void {}
   auto set_stopped() && noexcept -> void {}
 
   std::int32_t* kept = nullptr;
@@ -30,7 +31,7 @@ struct KeepingReceiver final {
 // A receiver that can throw from set_value.
 struct ThrowingReceiver final {
   auto set_value(std::int32_t) && -> void {}
-  auto set_error(lib::Status) && noexcept -> void {}
+  auto set_error(Status) && noexcept -> void {}
   auto set_stopped() && noexcept -> void {}
 };
 

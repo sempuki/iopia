@@ -13,7 +13,8 @@
 
 #include "base/core.hpp"
 #include "base/status.hpp"
-#include "iopia/argument.hpp"
+#include "core/argument.hpp"
+#include "core/status.hpp"
 #include "iopia/io_error.hpp"
 
 // One io_uring, its submission and completion queues, used from one thread.
@@ -49,7 +50,7 @@ class Ring final {
   // A ring with at least `entries` submission queue entries. `flags` are
   // liburing's IORING_SETUP_* bits, passed through.
   static auto make(std::uint32_t entries, std::uint32_t flags = 0)
-      -> std::expected<Ring, lib::Status>;
+      -> std::expected<Ring, Status>;
 
   // Takes the next free submission queue entry, or returns null if the queue
   // is full. The caller prepares it with an io_uring_prep_* function before
@@ -60,7 +61,7 @@ class Ring final {
   }
 
   // Hands every prepared entry to the kernel, and returns how many it took.
-  auto submit() -> std::expected<std::uint32_t, lib::Status> {
+  auto submit() -> std::expected<std::uint32_t, Status> {
     CHECK_PRECONDITION(ring_);
     int submitted = ::io_uring_submit(ring_.get());
     if (submitted < 0) [[unlikely]] {
@@ -73,7 +74,7 @@ class Ring final {
   // completions are ready, in one system call. Returns how many entries the
   // kernel took.
   auto submit_and_wait(std::uint32_t count)
-      -> std::expected<std::uint32_t, lib::Status> {
+      -> std::expected<std::uint32_t, Status> {
     CHECK_PRECONDITION(ring_);
     int submitted = ::io_uring_submit_and_wait(ring_.get(), count);
     if (submitted < 0) [[unlikely]] {
@@ -116,7 +117,7 @@ class Ring final {
   }
 
   // Waits for the next completion and returns a copy of it.
-  auto wait() -> std::expected<Completion, lib::Status> {
+  auto wait() -> std::expected<Completion, Status> {
     CHECK_PRECONDITION(ring_);
     ::io_uring_cqe* entry = nullptr;
     if (int result = ::io_uring_wait_cqe(ring_.get(), &entry); result < 0)

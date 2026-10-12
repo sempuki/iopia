@@ -163,7 +163,7 @@ auto ran = loop.run();                                // [begin] and [drive]
 ```cpp
 auto read_file(Depend<Loop> loop, std::int32_t file,
                std::span<std::byte> buffer)
-    -> Task<std::expected<std::uint32_t, lib::Status>> {
+    -> Task<std::expected<std::uint32_t, Status>> {
   co_return co_await Read{loop, file, buffer, 0};
   //        ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   //        |        [describe]
@@ -182,7 +182,7 @@ auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));
 | Register the callback | `co_await` calls `await_suspend(handle)`, which keeps the handle and puts `&Read` in `user_data` |
 | Begin the work | The loop submits the SQE that `await_suspend` prepared |
 | Call back | The loop calls `handle.resume()` |
-| Deliver the result | The completion stores `cqe->res` in the awaiter's `result_`. On resuming, `Read::await_resume()` turns it into a `std::expected<std::uint32_t, lib::Status>`, the bytes read becomes the value of the `co_await` expression |
+| Deliver the result | The completion stores `cqe->res` in the awaiter's `result_`. On resuming, `Read::await_resume()` turns it into a `std::expected<std::uint32_t, Status>`, the bytes read becomes the value of the `co_await` expression |
 | Cancel | Not yet; roadmap step 7 |
 | Where code runs | The thread running the loop |
 | Drive it from ordinary code | `run(InOut(loop), task)` |
@@ -448,7 +448,7 @@ if (!awaiter.await_ready()) {                 // Read: always false
   // false: no SQE was free, so continue at once with BUSY
 }
 resume_point_1:                               // the loop's resume() lands here
-auto read = awaiter.await_resume();           // std::expected<std::uint32_t, lib::Status>
+auto read = awaiter.await_resume();           // std::expected<std::uint32_t, Status>
 ```
 
 `await_suspend` may return other types, with other effects.
@@ -745,7 +745,7 @@ Changes where the frame comes from, and leaves the sequence as it is.
 | `user_data` | The awaiter's address | The operation state's address | Each awaiter is an `Operation`, and `user_data` points at it |
 | `io_uring_enter` | Code outside any coroutine | `sync_wait` | `run()` and `Loop::run_once()` |
 | A CQE | `resume()` | Calling the receiver | `Operation::complete` stores `res` and calls `resume()` |
-| `res` | `await_resume`'s value | `set_value` or `set_error` | `std::expected<T, lib::Status>` |
+| `res` | `await_resume`'s value | `set_value` or `set_error` | `std::expected<T, Status>` |
 | The operation's lifetime | The awaiter's lifetime | The operation state's lifetime | From `await_suspend` to `await_resume` |
 | Multishot | No direct match | No direct match | Not supported yet |
 | Linked SQEs | No direct match | Sequencing, such as `let_value` | Not supported yet |
@@ -764,7 +764,7 @@ choice in bold. Section I gives the reasons.
 | 2 | Lazy or eager | **Lazy**: the parent sets its continuation before the child runs. *Eager*: starts sooner; needs a handshake, and runs even if never awaited. |
 | 3 | How a finished child resumes its parent | *`resume()`*: grows the stack. *Symmetric transfer*: flat if the compiler makes a tail call. **Return to the parent's `await_suspend` when finished before stopping, symmetric transfer otherwise**: flat everywhere; a flag in the promise. |
 | 4 | Resume inline or queued | **Inline**: lowest latency; the coroutine runs inside dispatch. *Queued*: bounded, fair dispatch; a queue and a second pass. |
-| 5 | Results and errors | **`std::expected<T, lib::Status>`**: explicit; propagation by hand. *Throw*: free propagation; iopia avoids exceptions. *Raw `res`*: cheapest; every caller maps errno. |
+| 5 | Results and errors | **`std::expected<T, Status>`**: explicit; propagation by hand. *Throw*: free propagation; iopia avoids exceptions. *Raw `res`*: cheapest; every caller maps errno. |
 | 6 | A full submission queue | **Don't stop, report `BUSY`**: simple; callers need a plan. *Wait for space*: callers never see it; a wait queue in the loop. |
 | 7 | Where frames come from | **Default `operator new`**: nothing to write. *HALO*: free when it happens, rare without help. *A pool in the promise*: fast; size classes, and frames must not outlive it. |
 | 8 | Follow `std::execution::task` | **Own `Task`**: no sender code for coroutine users; needs a bridge. *Model it*: one set of operations; coroutine users compile senders. |

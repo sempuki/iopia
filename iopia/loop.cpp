@@ -2,6 +2,7 @@
 
 #include "iopia/loop.hpp"
 
+#include "core/status.hpp"
 #include "iopia/io_error.hpp"
 
 namespace iopia {
@@ -35,7 +36,7 @@ auto Loop::acquire_node() -> internal::HandlerNode& {
   return *node;
 }
 
-auto Loop::run() -> std::expected<void, lib::Status> {
+auto Loop::run() -> std::expected<void, Status> {
   while (pending_ > 0 && !stopping_) {
     auto dispatched = run_once();
     if (!dispatched && dispatched.error() != lib::watch(IoError::INTERRUPTED)) {

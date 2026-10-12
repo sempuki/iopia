@@ -7,18 +7,12 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "argument",
-    hdrs = ["argument.hpp"],
-    copts = COPTS,
-    deps = ["@lib//base:core"],
-)
-
-cc_library(
     name = "io_error",
     srcs = ["io_error.cpp"],
     hdrs = ["io_error.hpp"],
     copts = COPTS,
     deps = [
+        "//core:status",
         "@lib//base:core",
         "@lib//base:status",
     ],
@@ -30,9 +24,10 @@ cc_library(
     hdrs = ["ring.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
-        ":io_error",
         "//3rd_party:liburing",
+        "//core:argument",
+        "//core:status",
+        ":io_error",
         "@lib//base:core",
         "@lib//base:status",
     ],
@@ -54,11 +49,12 @@ cc_library(
     hdrs = ["loop.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
+        "//3rd_party:liburing",
+        "//core:argument",
+        "//core:status",
         ":io_error",
         ":operation",
         ":ring",
-        "//3rd_party:liburing",
         "@lib//base:core",
         "@lib//base:status",
     ],
@@ -69,7 +65,8 @@ cc_library(
     hdrs = ["task.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
+        "//core:argument",
+        "//core:status",
         ":io_error",
         ":loop",
         "@lib//base:core",
@@ -82,8 +79,9 @@ cc_library(
     hdrs = ["request.hpp"],
     copts = COPTS,
     deps = [
-        ":io_error",
         "//3rd_party:liburing",
+        "//core:status",
+        ":io_error",
         "@lib//base:status",
     ],
 )
@@ -93,12 +91,12 @@ cc_library(
     hdrs = ["awaitable.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
+        "//3rd_party:liburing",
+        "//core:argument",
         ":loop",
         ":operation",
         ":request",
         ":ring",
-        "//3rd_party:liburing",
         "@lib//base:core",
     ],
 )
@@ -108,7 +106,8 @@ cc_library(
     hdrs = ["sender.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
+        "//core:argument",
+        "//core:status",
         ":io_error",
         ":loop",
         "@lib//base:core",
@@ -121,13 +120,13 @@ cc_library(
     hdrs = ["request_sender.hpp"],
     copts = COPTS,
     deps = [
-        ":argument",
+        "//3rd_party:liburing",
+        "//core:argument",
         ":loop",
         ":operation",
         ":request",
         ":ring",
         ":sender",
-        "//3rd_party:liburing",
         "@lib//base:core",
     ],
 )

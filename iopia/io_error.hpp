@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "base/status.hpp"
+#include "core/status.hpp"
 
 // The errors iopia reports when a liburing call fails.
 namespace iopia {
@@ -30,10 +31,10 @@ inline constexpr std::size_t IO_ERROR_COUNT =
     static_cast<std::size_t>(IoError::COUNT);
 
 // The error a fallible function returns.
-using Failure = std::unexpected<lib::Status>;
+using Failure = std::unexpected<Status>;
 
 // The status for `result`, a negative errno that liburing's `call` returned.
-auto raise_io_error(int result, std::string_view call) -> lib::Status;
+auto raise_io_error(int result, std::string_view call) -> Status;
 
 }  // namespace iopia
 

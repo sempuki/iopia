@@ -17,7 +17,8 @@
 
 #include "base/core.hpp"
 #include "base/status.hpp"
-#include "iopia/argument.hpp"
+#include "core/argument.hpp"
+#include "core/status.hpp"
 #include "iopia/operation.hpp"
 #include "iopia/ring.hpp"
 
@@ -102,14 +103,14 @@ class Loop final {
   }
 
   // Hands every prepared entry to the kernel, and returns how many it took.
-  auto submit() -> std::expected<std::uint32_t, lib::Status> {
+  auto submit() -> std::expected<std::uint32_t, Status> {
     return ring_.submit();
   }
 
   // Submits what is prepared, waits for at least one completion, and calls
   // the operation of every completion that is ready. Returns how many it
   // called, or 0 at once if nothing is pending.
-  auto run_once() -> std::expected<std::uint32_t, lib::Status> {
+  auto run_once() -> std::expected<std::uint32_t, Status> {
     if (pending_ == 0) {
       return std::uint32_t{0};
     }
@@ -119,7 +120,7 @@ class Loop final {
 
   // Calls run_once() until nothing is pending or a handler calls stop(). An
   // interrupted wait is retried; any other error is returned at once.
-  auto run() -> std::expected<void, lib::Status>;
+  auto run() -> std::expected<void, Status>;
 
   // Makes run() return once the completions it is dispatching are done. It
   // affects only the run() in progress.

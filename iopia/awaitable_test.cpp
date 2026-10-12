@@ -1,6 +1,7 @@
 // Copyright 2026 -- CONTRIBUTORS. See LICENSE.
 
 #include "iopia/awaitable.hpp"
+#include "core/status.hpp"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -40,19 +41,19 @@ class MemoryFile final {
   std::int32_t file_ = -1;
 };
 
-auto no_op(Depend<Loop> loop) -> Task<std::expected<void, lib::Status>> {
+auto no_op(Depend<Loop> loop) -> Task<std::expected<void, Status>> {
   co_return co_await NoOp{loop};
 }
 
 auto read(Depend<Loop> loop, std::int32_t file, std::span<std::byte> buffer)
-    -> Task<std::expected<std::uint32_t, lib::Status>> {
+    -> Task<std::expected<std::uint32_t, Status>> {
   co_return co_await Read{loop, file, buffer, 0};
 }
 
 auto write_then_read(Depend<Loop> loop, std::int32_t file,
                      std::span<std::byte const> written,
                      std::span<std::byte> read)
-    -> Task<std::expected<std::uint32_t, lib::Status>> {
+    -> Task<std::expected<std::uint32_t, Status>> {
   auto wrote = co_await Write{loop, file, written, 0};
   if (!wrote) {
     co_return Failure{std::move(wrote).error()};
@@ -61,7 +62,7 @@ auto write_then_read(Depend<Loop> loop, std::int32_t file,
 }
 
 auto timeout(Depend<Loop> loop, std::chrono::nanoseconds duration)
-    -> Task<std::expected<void, lib::Status>> {
+    -> Task<std::expected<void, Status>> {
   co_return co_await Timeout{loop, duration};
 }
 

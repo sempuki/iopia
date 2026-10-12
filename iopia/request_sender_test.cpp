@@ -1,6 +1,7 @@
 // Copyright 2026 -- CONTRIBUTORS. See LICENSE.
 
 #include "iopia/request_sender.hpp"
+#include "core/status.hpp"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -44,7 +45,7 @@ struct RecordingReceiver final {
   enum class Completion { NONE, VALUE, ERROR, STOPPED };
 
   auto set_value() && noexcept -> void { *completion = Completion::VALUE; }
-  auto set_error(lib::Status) && noexcept -> void {
+  auto set_error(Status) && noexcept -> void {
     *completion = Completion::ERROR;
   }
   auto set_stopped() && noexcept -> void { *completion = Completion::STOPPED; }

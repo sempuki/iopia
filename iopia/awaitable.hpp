@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "base/core.hpp"
-#include "iopia/argument.hpp"
+#include "core/argument.hpp"
 #include "iopia/loop.hpp"
 #include "iopia/operation.hpp"
 #include "iopia/request.hpp"
