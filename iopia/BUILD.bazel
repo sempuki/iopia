@@ -78,18 +78,28 @@ cc_library(
 )
 
 cc_library(
+    name = "request",
+    hdrs = ["request.hpp"],
+    copts = COPTS,
+    deps = [
+        ":io_error",
+        "//3rd_party:liburing",
+        "@lib//base:status",
+    ],
+)
+
+cc_library(
     name = "awaitable",
     hdrs = ["awaitable.hpp"],
     copts = COPTS,
     deps = [
         ":argument",
-        ":io_error",
         ":loop",
         ":operation",
+        ":request",
         ":ring",
         "//3rd_party:liburing",
         "@lib//base:core",
-        "@lib//base:status",
     ],
 )
 

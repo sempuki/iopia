@@ -21,6 +21,7 @@ enum class IoError {
   BUSY,         // The kernel can't take more now; try again later.
   INTERRUPTED,  // A signal arrived while waiting.
   INVALID,      // An argument the kernel rejected.
+  CANCELLED,    // The operation was cancelled before it finished.
   OTHER,        // Any other errno.
   COUNT,
 };
