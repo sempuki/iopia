@@ -8,10 +8,9 @@ building it, and [Design.md](Design.md) explains why it works the way it does.
 | Layer | Header | Use it for |
 |---|---|---|
 | Coroutines | `iopia/task.hpp`, `iopia/awaitable.hpp` | Most code. Each operation reads as a `co_await`. |
+| Senders | `iopia/sender.hpp`, `iopia/request_sender.hpp` | Composing work as values, in the style of C++26's `std::execution`. |
 | Handlers on a loop | `iopia/loop.hpp`, `iopia/operation.hpp` | Code that wants a callback per completion and no coroutine frames. |
 | The ring | `iopia/ring.hpp` | Direct use of one `io_uring`, with no dispatch. |
-
-Senders and receivers arrive in roadmap step 5.
 
 Every layer runs on one thread. A ring and the loop that owns it belong to the
 thread that made them.
@@ -29,6 +28,7 @@ negative `errno` values become one of these `IoError` conditions.
 | `BUSY` | `EAGAIN`, `EBUSY` |
 | `INTERRUPTED` | `EINTR` |
 | `INVALID` | `EINVAL`, `EFAULT`, `EBADF` |
+| `CANCELLED` | `ECANCELED` |
 | `OTHER` | anything else |
 
 Compare a status with a condition through `lib::watch`. Its message names the
@@ -109,6 +109,87 @@ suspend, and it reports `IoError::BUSY`.
 - **Don't destroy a task while it waits on an operation.** The kernel holds
   the address of the awaitable in the task's frame. Run the task to the end.
   This rule lasts until cancellation exists (roadmap step 7).
+
+## Senders
+
+### Running a sender
+
+A sender describes work, and does nothing until it is run.
+`sync_wait(InOut(loop), sender)` runs it and returns its value, or its
+error.
+
+```cpp
+std::array<std::byte, 64> buffer;
+std::expected<std::uint32_t, lib::Status> bytes =
+    sync_wait(InOut(loop), ReadSender{Depend(loop), file, std::span{buffer}, 0});
+```
+
+A sender that was cancelled comes back as `IoError::CANCELLED`.
+
+### The io_uring senders
+
+| Sender | Completes with |
+|---|---|
+| `NoOpSender{Depend(loop)}` | nothing (`void`) |
+| `ReadSender{Depend(loop), file, buffer, offset}` | `std::uint32_t`, the bytes read |
+| `WriteSender{Depend(loop), file, buffer, offset}` | `std::uint32_t`, the bytes written |
+| `TimeoutSender{Depend(loop), duration}` | nothing, once `duration` has passed |
+
+A buffer must stay valid until the sender completes. If the loop has no SQE
+to hand out, the sender completes at once with `IoError::BUSY`.
+
+### Algorithms
+
+| Algorithm | Completes with |
+|---|---|
+| `just(value)` | `value`, at once |
+| `then(sender, function)`, or `sender \| then(function)` | `function(value)`; errors and stops pass through without calling it |
+
+The function given to `then` must be `noexcept`.
+
+```cpp
+auto doubled = sync_wait(
+    InOut(loop),
+    ReadSender{Depend(loop), file, std::span{buffer}, 0} |
+        then([](std::uint32_t bytes) noexcept { return bytes * 2; }));
+```
+
+### Scheduling onto a loop
+
+`LoopScheduler{Depend(loop)}.schedule()` returns a sender that completes from
+the loop's dispatch, so work after it runs on the loop's thread.
+
+```cpp
+LoopScheduler scheduler{Depend(loop)};
+auto value = sync_wait(InOut(loop),
+                       scheduler.schedule() | then([]() noexcept { return 42; }));
+```
+
+### Writing a receiver
+
+`connect` a sender to your own receiver to see each step. A receiver has the
+three completions, each `noexcept` and called on an rvalue.
+
+```cpp
+struct PrintBytes final {
+  auto set_value(std::uint32_t bytes) && noexcept -> void { std::println("{}", bytes); }
+  auto set_error(lib::Status error) && noexcept -> void { std::println("{}", error.message()); }
+  auto set_stopped() && noexcept -> void { std::println("stopped"); }
+};
+
+auto operation = ReadSender{Depend(loop), file, std::span{buffer}, 0}
+                     .connect(PrintBytes{});   // can't be moved; keep it here
+operation.start();                             // takes an SQE and prepares it
+auto ran = loop.run();                         // submits, waits, calls set_value
+```
+
+### Rules
+
+- **Completions and `then`'s functions are `noexcept`.** The compiler rejects
+  ones that aren't.
+- **Keep an operation state alive until it completes.** `connect` returns it
+  at a fixed address, and the kernel holds that address. Declare whatever its
+  receiver uses before the loop, as with handlers.
 
 ## Handlers on a loop
 

@@ -188,7 +188,8 @@ auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));
 | Drive it from ordinary code | `run(InOut(loop), task)` |
 
 **`std::execution`**. `read_sender` stands for a sender that reads with
-io_uring; iopia's arrives in roadmap step 5.
+io_uring. iopia's own is `ReadSender{Depend(loop), file, buffer, 0}`, with
+`then` and `sync_wait` from `iopia/sender.hpp`; Using.md shows it.
 
 ```cpp
 namespace ex = std::execution;
