@@ -79,6 +79,19 @@ maps it to a condition. The value a completion carries (`cqe->res`) is a
 result of the operation, so a front-end passes it on as the operation's
 outcome.
 
+**io_uring's negative `errno` values stay below the requests.** They travel
+in `Completion::result` through the ring, the loop and the completion
+protocol, and a request's `result()` is the one place they become a
+`Status`. Everything a front-end hands its user is a `Status`. A failure
+that no liburing call reported, such as a submission queue with no free
+entry, gets its `Status` directly (`raise_queue_full()`), so iopia never
+invents an `errno`.
+
+```
+kernel ──res (-errno)──► Completion ──► Operation ──► Request::result(res) ──► Status
+                                                       ▲ the only conversion
+```
+
 ## Architecture
 
 ```
@@ -257,7 +270,7 @@ tasks. [Design.coroutine.md](Design.coroutine.md) explains how io_uring's
 concepts map onto C++ coroutines, and the choices behind this section.
 
 **An awaitable is the completion protocol's operation.** Each derives from
-`Operation` through `internal::Awaitable`, so it lives in the awaiting
+`Operation` through `internal::AwaitableOperation`, so it lives in the awaiting
 coroutine's frame, at a fixed address, for as long as the kernel holds it.
 `await_suspend` takes an SQE from the loop and prepares it. The completion
 stores the result and resumes the coroutine, from inside the loop's dispatch.
@@ -266,8 +279,8 @@ stores the result and resumes the coroutine, from inside the loop's dispatch.
 `Timeout` treats as success.
 
 If the loop can't hand out an SQE, `await_suspend` returns `false`, the
-coroutine continues without suspending, and the awaitable reports `-EBUSY`
-as `IoError::BUSY`.
+coroutine continues without suspending, and `await_resume` reports
+`raise_queue_full()`, which is `IoError::BUSY`.
 
 **A task resumes its awaiter in one of two ways.** Starting a child task
 resumes it from the parent's `await_suspend`.
@@ -304,11 +317,11 @@ once, in `iopia/request.hpp`. A request knows how to prepare its SQE and how
 to turn its CQE's `res` into a `std::expected` value.
 
 ```
-                 NoOpRequest  ReadRequest  WriteRequest  TimeoutRequest
-                   prepare(sqe)            result(res)
-                  /                                    \
- internal::Awaitable<Request>                 RequestSender<Request>
- (NoOp, Read, Write, Timeout)                 (NoOpSender, ReadSender, ...)
+                  NoOpRequest  ReadRequest  WriteRequest  TimeoutRequest
+                    prepare(sqe)              result(res)
+                   /                                      \
+ internal::AwaitableOperation<Request>          RequestSender<Request>
+ (NoOp, Read, Write, Timeout)                   (NoOpSender, ReadSender, ...)
 ```
 
 A request is stored by value in the awaiter or the operation state, which sit
