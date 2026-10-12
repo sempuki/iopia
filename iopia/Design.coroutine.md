@@ -23,6 +23,22 @@ Any function whose body uses `co_await`, `co_yield` or `co_return` is one.
 | Awaiter | The object `co_await` works on. Its three member functions decide whether to stop, what to do on stopping, and what value the `co_await` produces. |
 | Return object | What the caller gets back from the call. Its type, the coroutine's return type, names the promise type, so it decides how the coroutine behaves. iopia's is `Task<T>`, which owns the handle. |
 
+### Lazy and eager
+
+A **lazy** coroutine doesn't run when it is called. The call creates its
+frame and returns, and the body starts only when something starts it, such as
+a parent that awaits it. An **eager** coroutine starts running its body as
+soon as it is called, and runs until its first stop before the call returns.
+
+```cpp
+Task<int> task = child();   // lazy: nothing in child() has run yet
+int value = co_await task;  // now child() starts
+```
+
+The promise's `initial_suspend` decides which, as the next sections show.
+iopia's `Task` is lazy, and so are `std::execution`'s senders and
+`std::execution::task`.
+
 ### What `co_await` does
 
 The compiler turns `auto value = co_await expression;` into roughly this.
@@ -94,6 +110,32 @@ that handle to get the parent running again. A child can be a parent too, so
 the chain can be any depth. The top task's continuation is
 `std::noop_coroutine()`, a handle whose `resume()` does nothing, so when the
 top task finishes, control returns to `run()`.
+
+### Where frames live
+
+Every call to a coroutine allocates its own frame with `operator new`,
+children included. A parent's frame holds the child's `Task`, which is one
+pointer to the child's frame, and the awaiters it is stopped on, such as a
+`Read`. The child's frame is a separate heap block.
+
+The standard lets a compiler omit a frame's allocation when it can prove the
+frame never outlives its caller, and put the child's frame inside the
+parent's. This is heap allocation elision (HALO). The standard permits it but
+never requires it, and a task type that stores its handle and destroys it
+later, as iopia's does, usually stops the compiler from proving it. Clang 20
+and later offer an extension, `[[clang::coro_await_elidable]]` on the task
+type, which elides the frame of a call that is awaited at once.
+
+A parent that awaits ten children, with iopia's `Task`:
+
+| Build | Allocations |
+|---|---|
+| GCC or Clang, at `-O0` or `-O2` | 11, one per frame |
+| Clang at `-O0`, with `[[clang::coro_await_elidable]]` on `Task` | 11 |
+| Clang at `-O2`, with `[[clang::coro_await_elidable]]` on `Task` | 1, the children inside the parent |
+
+`std::execution` gets nesting by construction. `connect` builds a child's
+operation state inside its parent's, with no allocation, on every compiler.
 
 ## How to think about the customization points
 
@@ -399,7 +441,7 @@ Every task call allocates its frame with `operator new`.
 | Option | Trade |
 |---|---|
 | **The default allocator** (iopia today) | Nothing to write. One allocation and one free per task. |
-| **Allocation elision (HALO).** The compiler may put a child's frame inside its parent's when it can prove the child's lifetime is nested. | Free when it happens. Compilers rarely manage it when the task type owns its handle, and nothing guarantees it. |
+| **Allocation elision (HALO).** The compiler may put a child's frame inside its parent's when it can prove the child's lifetime is nested. | Free when it happens. Without help, neither GCC nor Clang elided any of iopia's child frames. Clang's `[[clang::coro_await_elidable]]` on `Task` elided all of them at `-O2`. GCC has no equivalent, and nothing is elided at `-O0`. |
 | **A custom `operator new` in the promise**, taking frames from a per-loop pool. | Fast, and fits one ring per thread. Frame sizes vary, so the pool needs size classes, and a frame must not outlive its pool. |
 
 ### 8. Following `std::execution::task`
