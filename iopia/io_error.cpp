@@ -1,6 +1,7 @@
 // Copyright 2026 -- CONTRIBUTORS. See LICENSE.
 
 #include "iopia/io_error.hpp"
+#include "core/status.hpp"
 
 #include <cerrno>
 #include <format>
@@ -54,7 +55,7 @@ auto condition_of(int error) -> IoError {
 
 }  // namespace
 
-auto raise_io_error(int result, std::string_view call) -> lib::Status {
+auto raise_io_error(int result, std::string_view call) -> Status {
   CHECK_PRECONDITION(result < 0);
   int error = -result;
   return lib::raise(condition_of(error),

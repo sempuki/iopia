@@ -1,0 +1,20 @@
+# Copyright 2026 -- CONTRIBUTORS. See LICENSE.
+
+load("@lib//bazel:copts.bzl", "COPTS")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "argument",
+    hdrs = ["argument.hpp"],
+    copts = COPTS,
+    deps = ["@lib//base:core"],
+)
+
+cc_library(
+    name = "status",
+    hdrs = ["status.hpp"],
+    copts = COPTS,
+    deps = ["@lib//base:status"],
+)

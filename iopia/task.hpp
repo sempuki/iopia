@@ -11,7 +11,8 @@
 
 #include "base/core.hpp"
 #include "base/status.hpp"
-#include "iopia/argument.hpp"
+#include "core/argument.hpp"
+#include "core/status.hpp"
 #include "iopia/io_error.hpp"
 #include "iopia/loop.hpp"
 
@@ -142,7 +143,7 @@ class [[nodiscard]] Task final {
 
   template <typename RunValueType>
   friend auto run(InOut<Loop> loop, Task<RunValueType> task)
-      -> std::expected<RunValueType, lib::Status>;
+      -> std::expected<RunValueType, Status>;
 
   explicit Task(std::coroutine_handle<promise_type> coroutine) noexcept
       : coroutine_{coroutine} {}
@@ -173,7 +174,7 @@ inline auto internal::Promise<void>::get_return_object() noexcept
 // returned at once.
 template <typename ValueType>
 auto run(InOut<Loop> loop, Task<ValueType> task)
-    -> std::expected<ValueType, lib::Status> {
+    -> std::expected<ValueType, Status> {
   CHECK_PRECONDITION(task.coroutine_);
   task.coroutine_.resume();
   while (!task.coroutine_.done()) {

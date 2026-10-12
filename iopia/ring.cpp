@@ -1,6 +1,7 @@
 // Copyright 2026 -- CONTRIBUTORS. See LICENSE.
 
 #include "iopia/ring.hpp"
+#include "core/status.hpp"
 
 namespace iopia {
 
@@ -11,7 +12,7 @@ auto internal::IoUringDelete::operator()(::io_uring* ring) const noexcept
 }
 
 auto Ring::make(std::uint32_t entries, std::uint32_t flags)
-    -> std::expected<Ring, lib::Status> {
+    -> std::expected<Ring, Status> {
   auto ring = std::make_unique<::io_uring>();
   if (int result = ::io_uring_queue_init(entries, ring.get(), flags);
       result < 0) {

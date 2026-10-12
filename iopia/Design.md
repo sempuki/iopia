@@ -63,8 +63,9 @@ iopia follows the conventions every project that uses lib shares, in lib's
 **Code lives in the `iopia` package and the `iopia` namespace,** with
 implementation details in `iopia::internal`. The gateway lives in the
 `gateway` package and the `iopia::gateway` namespace, so the library never
-depends on iceoryx2. `iopia/argument.hpp` declares `Out`, `InOut` and
-`Depend` in `iopia`.
+depends on iceoryx2. The `core` package declares lib's vocabulary types in
+`iopia`, as simon's does: `core/argument.hpp` for `Out`, `InOut` and
+`Depend`, and `core/status.hpp` for `Status`.
 
 **liburing's names keep their abbreviations.** `IoError` keeps "io", because it
 follows io_uring's naming, and liburing's own names such as
@@ -260,7 +261,7 @@ concepts map onto C++ coroutines, and the choices behind this section.
 coroutine's frame, at a fixed address, for as long as the kernel holds it.
 `await_suspend` takes an SQE from the loop and prepares it. The completion
 stores the result and resumes the coroutine, from inside the loop's dispatch.
-`await_resume` turns a negative result into a `lib::Status` through
+`await_resume` turns a negative result into a `Status` through
 `raise_io_error`. A timeout that expires completes with `-ETIME`, which
 `Timeout` treats as success.
 
@@ -326,7 +327,7 @@ The sender front-end is iopia's own implementation of C++26's
 | iopia | The standard | What iopia leaves out |
 |---|---|---|
 | `Sender`: has a `value_type` | `sender`, with completion signatures | Several value types, and per-sender error types |
-| `Receiver<R, T>`: `set_value(T)`, `set_error(lib::Status)`, `set_stopped()`, all `noexcept`, on an rvalue | `receiver_of` | Environments (`get_env`), until cancellation needs stop tokens |
+| `Receiver<R, T>`: `set_value(T)`, `set_error(Status)`, `set_stopped()`, all `noexcept`, on an rvalue | `receiver_of` | Environments (`get_env`), until cancellation needs stop tokens |
 | `OperationState`: `start()`, `noexcept` | `operation_state` | |
 | `SenderTo<S, R>`: `std::move(sender).connect(receiver)` returns an operation state | `sender_to` | |
 | `Scheduler`: `schedule()` returns a sender of `void`; equality-comparable | `scheduler` | Forward-progress and completion-scheduler queries |
@@ -334,7 +335,7 @@ The sender front-end is iopia's own implementation of C++26's
 `connect`, `start`, `schedule` and the three completions are member
 functions, as in the standard since P2855. A sender's single `value_type`,
 possibly `void`, stands in for completion signatures, and every error is a
-`lib::Status`, as everywhere else in iopia. The three completions are
+`Status`, as everywhere else in iopia. The three completions are
 `noexcept`, as handlers are.
 
 **A request sender's operation state is the completion protocol's
@@ -347,7 +348,7 @@ place. `start()` takes an SQE and prepares the request.
 |---|---|
 | `res == -ECANCELED` | `set_stopped` |
 | the request's `result(res)` holds a value | `set_value` with the value |
-| the request's `result(res)` holds an error | `set_error` with the `lib::Status` |
+| the request's `result(res)` holds an error | `set_error` with the `Status` |
 | no SQE was free | `set_error` with `IoError::BUSY`, from inside `start()` |
 
 **Algorithms nest without allocating.** `then` connects its inner sender to a
@@ -364,7 +365,7 @@ sync_wait(loop, ReadSender{...} | then(f))
 
 **`sync_wait(InOut(loop), sender)` drives the loop,** the way `run()` does
 for a task: it connects and starts the sender, then calls `run_once()` until
-the receiver has a result. It returns a flat `std::expected<T, lib::Status>`;
+the receiver has a result. It returns a flat `std::expected<T, Status>`;
 a stopped sender comes back as `IoError::CANCELLED`. The operation state lives
 on `sync_wait`'s stack, so the same rule as for a task applies: if waiting
 fails, the kernel may still hold its address.
@@ -440,7 +441,7 @@ network protocol between gateways.
 | The namespace and package are `iopia`. | One name for the project, the code and its includes. |
 | liburing 2.15 comes from the Bazel Central Registry. | Every dependency comes from the registry, as in simon. The registry's build reads the host's kernel headers once; see `3rd_party/README.md`. |
 | C++26, from lib's `COPTS`. | Shared with simon and volcano. Coroutines need only C++20. |
-| A ring belongs to one thread. | Simplest to start with, and `lib::Status` isn't thread-safe. |
+| A ring belongs to one thread. | Simplest to start with, and `Status` isn't thread-safe. |
 | The loop calls an operation through a function pointer stored in it. | Operations carry no vtable, and each front-end supplies its own function. A virtual function would make every operation polymorphic. |
 | Handlers are caller-owned (`HandlerOperation<H>`) or loop-owned (`loop.queue`, on `std::move_only_function`). | Caller-owned costs nothing and is what the front-ends need. Loop-owned frees the caller from lifetimes, and reuses the standard library's small-buffer storage instead of a pool of hand-made slots. |
 | A loop cancels and drains pending operations when destroyed. | Every handler sees its last completion and is destroyed; nothing leaks with the ring. |
@@ -448,7 +449,7 @@ network protocol between gateways.
 | A full submission queue is submitted and retried once; null means it still failed. | Most programs never see a full queue, and callers keep one simple contract: null means try later. |
 | `run()` returns when nothing is pending or a handler calls `stop()`. | It is what `sync_wait` and a coroutine's top-level run will need, without a timeout API yet. |
 | Each io_uring request is written once, in `request.hpp`, and both front-ends build on it. | Goal 2: neither front-end is a port of the other. |
-| A sender has one `value_type`, every error is a `lib::Status`, and the three completions are `noexcept`. | The standard's completion signatures teach less than they cost here, and the rest of iopia already reports errors as `lib::Status` and forbids throwing completions. |
+| A sender has one `value_type`, every error is a `Status`, and the three completions are `noexcept`. | The standard's completion signatures teach less than they cost here, and the rest of iopia already reports errors as `Status` and forbids throwing completions. |
 | A request sender's `-ECANCELED` completes with `set_stopped`, and `sync_wait` reports it as `IoError::CANCELLED`. | Cancellation is the stopped channel's purpose; the loop's destructor already cancels what is pending. |
 | `Task<T>` is iopia's own coroutine type and doesn't await senders. | Coroutine users compile no sender code, per "you pay only for what you use". This settles whether to follow `std::execution::task`; step 6 bridges the two front-ends. |
 | A child task that finishes before suspending returns to its parent's `await_suspend`. | Symmetric transfer isn't a tail call under GCC at `-O0`, and a loop over such children would overflow the stack. |

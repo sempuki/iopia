@@ -12,6 +12,7 @@
 #include <span>
 
 #include "base/status.hpp"
+#include "core/status.hpp"
 #include "iopia/io_error.hpp"
 
 // The io_uring requests both front-ends issue. A request prepares its
@@ -27,7 +28,7 @@ struct NoOpRequest final {
     ::io_uring_prep_nop(submission);
   }
 
-  auto result(std::int32_t result) const -> std::expected<void, lib::Status> {
+  auto result(std::int32_t result) const -> std::expected<void, Status> {
     if (result < 0) [[unlikely]] {
       return Failure{raise_io_error(result, "no-op")};
     }
@@ -46,7 +47,7 @@ struct ReadRequest final {
   }
 
   auto result(std::int32_t result) const
-      -> std::expected<std::uint32_t, lib::Status> {
+      -> std::expected<std::uint32_t, Status> {
     if (result < 0) [[unlikely]] {
       return Failure{raise_io_error(result, "read")};
     }
@@ -69,7 +70,7 @@ struct WriteRequest final {
   }
 
   auto result(std::int32_t result) const
-      -> std::expected<std::uint32_t, lib::Status> {
+      -> std::expected<std::uint32_t, Status> {
     if (result < 0) [[unlikely]] {
       return Failure{raise_io_error(result, "write")};
     }
@@ -100,7 +101,7 @@ class TimeoutRequest final {
   }
 
   // A timeout that expires completes with -ETIME, which is its success.
-  auto result(std::int32_t result) const -> std::expected<void, lib::Status> {
+  auto result(std::int32_t result) const -> std::expected<void, Status> {
     if (result < 0 && result != -ETIME) [[unlikely]] {
       return Failure{raise_io_error(result, "timeout")};
     }
