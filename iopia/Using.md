@@ -135,7 +135,7 @@ operation alive until its last completion. It can't be moved.
 HandlerOperation operation{[&](Completion completion) noexcept {
   // completion.result is the operation's result, or a negative errno.
 }};
-if (::io_uring_sqe* submission = loop.maybe_submission(Depend(operation))) {
+if (::io_uring_sqe* submission = loop.try_take_submission(Depend(operation))) {
   ::io_uring_prep_nop(submission);
 }
 ```
@@ -156,7 +156,7 @@ allocates once a capture is larger than 24 bytes. Design.md's Handlers section
 compares the two.
 
 When the submission queue is full, both submit what the queue holds and try
-once more. A null SQE from `maybe_submission`, or `false` from `queue`,
+once more. A null SQE from `try_take_submission`, or `false` from `queue`,
 means that failed too, so try again after the loop has run.
 
 ### Running
@@ -210,7 +210,7 @@ struct CountingOperation final : Operation {
 | Call | What it does |
 |---|---|
 | `Ring::make(entries, flags)` | Sets up a ring with room for at least `entries` SQEs. `flags` are liburing's `IORING_SETUP_*` bits. |
-| `ring.maybe_submission()` | The next free SQE, or null if the queue is full. |
+| `ring.try_take_submission()` | The next free SQE, or null if the queue is full. |
 | `ring.submit()` | Hands every prepared SQE to the kernel, and returns how many it took. |
 | `ring.submit_and_wait(count)` | Submits, then waits until at least `count` completions are ready, in one system call. |
 | `ring.wait()` | Waits for the next completion and returns a copy of it. |

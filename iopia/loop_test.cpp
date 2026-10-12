@@ -37,7 +37,7 @@ auto make_loop(std::uint32_t entries = 8, std::uint32_t flags = 0) -> Loop {
 
 // Submits a no-op that completes `operation`.
 auto submit_no_op(Depend<Operation> operation, InOut<Loop> loop) -> void {
-  ::io_uring_sqe* submission = loop->maybe_submission(operation);
+  ::io_uring_sqe* submission = loop->try_take_submission(operation);
   REQUIRE(submission);
   ::io_uring_prep_nop(submission);
 }
@@ -157,7 +157,8 @@ TEST_CASE("Loop") {
 
     // Under Test.
     // Postconditions.
-    CHECK_THROWS_AS(loop.maybe_submission(Depend(operation)), std::logic_error);
+    CHECK_THROWS_AS(loop.try_take_submission(Depend(operation)),
+                    std::logic_error);
   }
 
   SECTION("ShouldCallCallerOwnedHandlerGivenNoOp") {

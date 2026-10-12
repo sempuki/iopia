@@ -51,9 +51,10 @@ class Ring final {
   static auto make(std::uint32_t entries, std::uint32_t flags = 0)
       -> std::expected<Ring, lib::Status>;
 
-  // The next free submission queue entry, or null if the queue is full. The
-  // caller prepares it with an io_uring_prep_* function before submit().
-  auto maybe_submission() -> ::io_uring_sqe* {
+  // Takes the next free submission queue entry, or returns null if the queue
+  // is full. The caller prepares it with an io_uring_prep_* function before
+  // submit().
+  auto try_take_submission() -> ::io_uring_sqe* {
     CHECK_PRECONDITION(ring_);
     return ::io_uring_get_sqe(ring_.get());
   }

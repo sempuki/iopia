@@ -83,7 +83,7 @@ task                       loop                          kernel
 co_await Read{...}
   await_ready -> false
   await_suspend(handle)
-    maybe_submission(this) ── SQE, user_data = &awaiter
+    try_take_submission(this) ── SQE, user_data = &awaiter
     io_uring_prep_read
     remember handle
     return true
@@ -159,7 +159,7 @@ success costs nothing extra.
 
 ### 6. When the submission queue is full
 
-`Loop::maybe_submission` already submits what the queue holds and tries once
+`Loop::try_take_submission` already submits what the queue holds and tries once
 more. If it still has no SQE, the awaiter must do something.
 
 | Option | Trade |

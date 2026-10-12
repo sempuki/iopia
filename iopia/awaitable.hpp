@@ -37,7 +37,7 @@ class Awaitable : public Operation {
   auto await_ready() const noexcept -> bool { return false; }
 
   auto await_suspend(std::coroutine_handle<> awaiting) -> bool {
-    ::io_uring_sqe* submission = loop_->maybe_submission(Depend(*this));
+    ::io_uring_sqe* submission = loop_->try_take_submission(Depend(*this));
     if (!submission) [[unlikely]] {
       result_ = -EBUSY;
       return false;

@@ -90,6 +90,11 @@ take a `std::uint32_t` without a cast, since the two are the same type on
 Linux. A value a C call returns, such as liburing's `int` results, keeps its
 type only until iopia converts it.
 
+**A function that acts and may fail is named `try_*`.** A verb says the
+function does work, and `try_` says it can come back empty-handed:
+`try_take_submission` claims a free SQE and returns null when none is free.
+simon's `maybe_*` stays for getters that may return null.
+
 **Names avoid abbreviations,** except where they come from the C API:
 `submission`, not `sqe`. `IoError` keeps "io", because it follows io_uring's
 naming.

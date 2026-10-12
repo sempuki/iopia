@@ -15,7 +15,7 @@ TEST_CASE("Ring") {
     // Preconditions.
     auto ring = Ring::make(8);
     REQUIRE(ring);
-    ::io_uring_sqe* submission = ring->maybe_submission();
+    ::io_uring_sqe* submission = ring->try_take_submission();
     REQUIRE(submission);
     ::io_uring_prep_nop(submission);
     ::io_uring_sqe_set_data64(submission, 42);
@@ -36,10 +36,10 @@ TEST_CASE("Ring") {
     // Preconditions.
     auto ring = Ring::make(1);
     REQUIRE(ring);
-    REQUIRE(ring->maybe_submission());
+    REQUIRE(ring->try_take_submission());
 
     // Under Test.
-    ::io_uring_sqe* submission = ring->maybe_submission();
+    ::io_uring_sqe* submission = ring->try_take_submission();
 
     // Postconditions.
     CHECK(submission == nullptr);
@@ -54,7 +54,7 @@ TEST_CASE("Ring") {
     Ring ring = *std::move(made);
 
     // Postconditions.
-    ::io_uring_sqe* submission = ring.maybe_submission();
+    ::io_uring_sqe* submission = ring.try_take_submission();
     REQUIRE(submission);
     ::io_uring_prep_nop(submission);
     ::io_uring_sqe_set_data64(submission, 7);
@@ -81,7 +81,7 @@ TEST_CASE("Ring") {
     auto ring = Ring::make(8);
     REQUIRE(ring);
     for (std::uint64_t user_data : {1u, 2u}) {
-      ::io_uring_sqe* submission = ring->maybe_submission();
+      ::io_uring_sqe* submission = ring->try_take_submission();
       REQUIRE(submission);
       ::io_uring_prep_nop(submission);
       ::io_uring_sqe_set_data64(submission, user_data);
@@ -106,7 +106,7 @@ TEST_CASE("Ring") {
     auto ring = Ring::make(8);
     REQUIRE(ring);
     for (std::uint64_t user_data : {1u, 2u, 3u}) {
-      ::io_uring_sqe* submission = ring->maybe_submission();
+      ::io_uring_sqe* submission = ring->try_take_submission();
       REQUIRE(submission);
       ::io_uring_prep_nop(submission);
       ::io_uring_sqe_set_data64(submission, user_data);
@@ -130,7 +130,7 @@ TEST_CASE("Ring") {
     auto ring = Ring::make(8);
     REQUIRE(ring);
     for (std::uint64_t user_data : {1u, 2u, 3u}) {
-      ::io_uring_sqe* submission = ring->maybe_submission();
+      ::io_uring_sqe* submission = ring->try_take_submission();
       REQUIRE(submission);
       ::io_uring_prep_nop(submission);
       ::io_uring_sqe_set_data64(submission, user_data);
