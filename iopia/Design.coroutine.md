@@ -182,7 +182,7 @@ auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));
 | Register the callback | `co_await` calls `await_suspend(handle)`, which keeps the handle and puts `&Read` in `user_data` |
 | Begin the work | The loop submits the SQE that `await_suspend` prepared |
 | Call back | The loop calls `handle.resume()` |
-| Deliver the result | The completion stores `cqe->res` in the awaiter's `result_`. On resuming, `Read::await_resume()` turns it into a `std::expected<std::uint32_t, lib::Status>`, the bytes read or a `raise_io_error` status, which becomes the value of the `co_await` expression |
+| Deliver the result | The completion stores `cqe->res` in the awaiter's `result_`. On resuming, `Read::await_resume()` turns it into a `std::expected<std::uint32_t, lib::Status>`, the bytes read becomes the value of the `co_await` expression |
 | Cancel | Not yet; roadmap step 7 |
 | Where code runs | The thread running the loop |
 | Drive it from ordinary code | `run(InOut(loop), task)` |
@@ -323,6 +323,42 @@ A function becomes a coroutine when its body uses `co_await`, `co_yield` or
 `co_return`. The return type names the promise type through
 `std::coroutine_traits<Return, Arguments...>::promise_type`, which by default
 is `Return::promise_type`.
+
+### C0. The code as written
+
+The rest of this section expands this coroutine, and a caller that uses it.
+The comments say which part expands where.
+
+```cpp
+auto child(Depend<Loop> loop, std::int32_t file,      // C1: calling it
+           std::span<std::byte> buffer)
+    -> Task<std::int32_t> {                            // Task<std::int32_t>::promise_type
+                                                       // is the promise
+  // C2 wraps everything between the braces.
+  auto read = co_await Read{loop, file, buffer, 0};    // C3: co_await
+  if (!read) {
+    co_return -1;                                      // C5: co_return
+  }
+  co_return static_cast<std::int32_t>(*read);          // C5
+}                                                      // C6 splits the body at the co_await
+
+auto parent(Depend<Loop> loop) -> Task<std::int32_t> {
+  std::array<std::byte, 64> buffer;
+  Task<std::int32_t> task = child(loop, file, buffer); // C1
+  std::int32_t bytes = co_await std::move(task);       // C3, through Task's operator co_await
+  co_return bytes;
+}                                                      // task's destructor: C7
+```
+
+`Task` has no `co_yield`. A generator shows C4.
+
+```cpp
+auto count_to(std::int32_t limit) -> std::generator<std::int32_t> {
+  for (std::int32_t n = 1; n <= limit; ++n) {
+    co_yield n;                                        // C4: co_yield
+  }
+}
+```
 
 ### C1. The call
 
