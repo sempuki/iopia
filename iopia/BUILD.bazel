@@ -103,6 +103,35 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "sender",
+    hdrs = ["sender.hpp"],
+    copts = COPTS,
+    deps = [
+        ":argument",
+        ":io_error",
+        ":loop",
+        "@lib//base:core",
+        "@lib//base:status",
+    ],
+)
+
+cc_library(
+    name = "request_sender",
+    hdrs = ["request_sender.hpp"],
+    copts = COPTS,
+    deps = [
+        ":argument",
+        ":loop",
+        ":operation",
+        ":request",
+        ":ring",
+        ":sender",
+        "//3rd_party:liburing",
+        "@lib//base:core",
+    ],
+)
+
 [cc_test(
     name = test + "_test",
     size = "small",
@@ -115,6 +144,8 @@ cc_library(
 ) for test, extra_deps in [
     ("awaitable", [":task"]),
     ("loop", []),
+    ("request_sender", []),
     ("ring", []),
+    ("sender", [":request_sender"]),
     ("task", [":awaitable"]),
 ]]
