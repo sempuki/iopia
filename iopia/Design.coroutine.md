@@ -281,18 +281,25 @@ finishes. A child can be a parent too. The top task is started by ordinary
 code, such as `run()`, and has no parent.
 
 ```cpp
-auto child(Depend<Loop> loop) -> Task<std::int32_t> {
-  co_await Read{loop, file, buffer, 0};
-  co_return 7;
+auto child(Depend<Loop> loop, std::int32_t file, std::span<std::byte> buffer)
+    -> Task<std::int32_t> {
+  auto read = co_await Read{loop, file, buffer, 0};
+  if (!read) {
+    co_return -1;
+  }
+  co_return static_cast<std::int32_t>(*read);
 }
 
-auto parent(Depend<Loop> loop) -> Task<std::int32_t> {
-  std::int32_t value = co_await child(loop);
-  co_return value * 2;
+auto parent(Depend<Loop> loop, std::int32_t file) -> Task<std::int32_t> {
+  std::array<std::byte, 64> buffer;
+  std::int32_t bytes = co_await child(loop, file, buffer);
+  co_return bytes;
 }
 
-auto result = run(InOut(loop), parent(Depend(loop)));
+auto result = run(InOut(loop), parent(Depend(loop), file));
 ```
+
+The rest of this document uses this example.
 
 ### Custody: one owner at a time
 
@@ -326,7 +333,7 @@ is `Return::promise_type`.
 
 ### C0. The code as written
 
-The rest of this section expands this coroutine, and a caller that uses it.
+The rest of this section expands B's example, repeated here.
 The comments say which part expands where.
 
 ```cpp
@@ -344,10 +351,13 @@ auto child(Depend<Loop> loop, std::int32_t file,      // C1: calling it
 
 auto parent(Depend<Loop> loop, std::int32_t file) -> Task<std::int32_t> {
   std::array<std::byte, 64> buffer;
-  Task<std::int32_t> task = child(loop, file, buffer); // C1
-  std::int32_t bytes = co_await std::move(task);       // C3, through Task's operator co_await
-  co_return bytes;
-}                                                      // task's destructor: C7
+  std::int32_t bytes = co_await child(loop, file, buffer);
+  //                   ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^
+  //                   |        C1: calling child returns a Task temporary
+  //                   C3, through Task's operator co_await
+  // The statement ends: the Task temporary's destructor runs C7.
+  co_return bytes;                                     // C5
+}
 ```
 
 `Task` has no `co_yield`. A generator shows C4.
@@ -362,114 +372,173 @@ auto count_to(std::int32_t limit) -> std::generator<std::int32_t> {
 
 ### C1. The call
 
-Calling the coroutine runs roughly this, before any of the body.
+`child(loop, file, buffer)` runs roughly this before any of its body. Here
+`promise_type` is `Task<std::int32_t>::promise_type`, which is iopia's
+`internal::Promise<std::int32_t>`.
 
 ```cpp
-auto child(Arguments... arguments) -> Task<T> {
-  // 1. Allocate the frame. The promise's operator new is used if it has one,
-  //    first trying operator new(size, arguments...).
-  void* frame = promise_type::operator new(frame_size);
-  // If the promise has get_return_object_on_allocation_failure(), the
-  // allocation uses nothrow new, and a null frame returns that object instead.
+// child(loop, file, buffer), called in parent's co_await statement:
 
-  // 2. Copy the parameters into the frame. By-value parameters are moved or
-  //    copied. Reference parameters stay references.
-  // 3. Construct the promise in the frame, from the parameter copies if it has
-  //    a matching constructor, otherwise by default.
-  // 4. Make the object the caller gets back.
-  auto return_object = promise.get_return_object();
-  // 5. Run the body (C2). The call returns return_object to the caller at the
-  //    coroutine's first stop, or when it finishes.
-}
+// 1. Allocate the frame. Promise<std::int32_t> declares no operator new, so the
+//    global one is used. (In general, the promise's operator new comes first,
+//    tried with (size, loop, file, buffer), then with (size).)
+void* frame = ::operator new(sizeof(child_frame));
+
+// 2. Copy the parameters into the frame. All three are by value: loop (a
+//    Depend<Loop>, one pointer), file, and buffer (a std::span, which still
+//    points at parent's array). A reference parameter would stay a reference.
+frame->loop = loop;  frame->file = file;  frame->buffer = buffer;
+
+// 3. Construct the promise in the frame. Promise<std::int32_t> has no
+//    constructor taking (loop, file, buffer), so it is default-constructed.
+new (&frame->promise) Promise<std::int32_t>{};
+
+// 4. Make the object the caller gets back: a Task holding the frame's handle.
+Task<std::int32_t> task = frame->promise.get_return_object();
+
+// 5. Run the body (C2) until its first stop, then return task to parent as
+//    the temporary it awaits. initial_suspend stops at once, since Task is
+//    lazy, so parent gets the Task before any of child's body has run.
 ```
 
 ### C2. The body
 
+The compiler wraps `child`'s body like this.
+
 ```cpp
 {
   try {
-    co_await promise.initial_suspend();       // lazy coroutines stop here
-    /* the function body */
+    co_await frame->promise.initial_suspend();   // std::suspend_always: stop here
+    // ---- child's body, as written in C0 ----
+    auto read = co_await Read{loop, file, buffer, 0};
+    if (!read) {
+      co_return -1;
+    }
+    co_return static_cast<std::int32_t>(*read);
+    // ----
   } catch (...) {
     if (/* initial_suspend's await_resume hasn't run */) throw;
-    promise.unhandled_exception();
+    frame->promise.unhandled_exception();         // iopia: std::terminate()
   }
 final_suspend:
-  co_await promise.final_suspend();           // must not throw
-  // If final_suspend didn't stop, the frame is destroyed here (C7).
+  co_await frame->promise.final_suspend();        // PromiseBase::FinalAwaiter
+  // If final_suspend didn't stop, the frame would be destroyed here (C7).
+  // FinalAwaiter always stops, so parent's Task destroys it later.
 }
 ```
 
-### C3. `co_await expression`
+### C3. `co_await Read{loop, file, buffer, 0}`
 
 ```cpp
-// a. The promise may rewrite the expression.
-auto&& awaitable = promise.await_transform(expression);  // only if the promise
-                                                          // declares await_transform
-// b. The awaitable may supply a separate awaiter.
-auto&& awaiter = awaitable.operator co_await();  // or a free operator co_await,
-                                                 // or the awaitable itself
+// a. Promise<std::int32_t> declares no await_transform, so the expression is
+//    used as it is. (In general: promise.await_transform(expression).)
+// b. Read declares no operator co_await, so Read is its own awaiter.
+//    (Task does declare one; parent's co_await uses it.)
+auto&& awaiter = Read{loop, file, buffer, 0}; // a temporary, kept in the frame
+
 // c. The three hooks.
-if (!awaiter.await_ready()) {
-  // Save the state into the frame, and note where to resume.
-  auto next = awaiter.await_suspend(this_handle);
-  //   void            -> stop, and return to whoever resumed this coroutine
-  //   bool true       -> the same
-  //   bool false      -> don't stop; continue below at once
-  //   handle h        -> stop, and resume h instead (symmetric transfer)
-  //   throws          -> don't stop; the exception leaves the co_await
-  // <- resume() continues here
+if (!awaiter.await_ready()) {                 // Read: always false
+  frame->stopped_at = 1;                      // where to resume (C6)
+  bool stop = awaiter.await_suspend(handle);  // Read: take an SQE, prepare it,
+                                              // keep the handle
+  if (stop) {
+    return;                                   // back to whoever resumed child
+  }
+  // false: no SQE was free, so continue at once with BUSY
 }
-auto value = awaiter.await_resume();
+resume_point_1:                               // the loop's resume() lands here
+auto read = awaiter.await_resume();           // std::expected<std::uint32_t, lib::Status>
 ```
+
+`await_suspend` may return other types, with other effects.
+
+| `await_suspend` returns | Effect |
+|---|---|
+| `void`, or `true` | Stop, and return to whoever resumed this coroutine (Read when it has an SQE) |
+| `false` | Don't stop; continue at once (Read when no SQE is free) |
+| a handle `h` | Stop, and resume `h` instead: symmetric transfer (`FinalAwaiter`) |
+| throws | Don't stop; the exception leaves the `co_await` |
 
 `initial_suspend`, `final_suspend` and `yield_value` results skip step a.
 
-### C4. `co_yield value`
+### C4. `co_yield n`
+
+From `count_to` in C0.
 
 ```cpp
-co_await promise.yield_value(value);
+co_yield n;
+// becomes
+co_await promise.yield_value(n);   // std::generator stores n and stops
 ```
 
 ### C5. `co_return`
 
+From `child` in C0.
+
 ```cpp
-co_return value;   // -> promise.return_value(value); goto final_suspend;
-co_return;         // -> promise.return_void();       goto final_suspend;
-// Falling off the end -> promise.return_void(), if the promise has it;
-//                        otherwise undefined behavior.
+co_return -1;
+// becomes
+frame->promise.return_value(-1);   // Promise<std::int32_t> stores it in value_
+goto final_suspend;
+
+co_return static_cast<std::int32_t>(*read);
+// becomes
+frame->promise.return_value(static_cast<std::int32_t>(*read));
+goto final_suspend;
 ```
+
+A `co_return;` with no value calls `promise.return_void()`. Falling off the
+end does the same if the promise has `return_void`, which `Task<void>`'s has,
+and is undefined behavior otherwise, as in `child`.
 
 ### C6. The state machine
 
-The compiler splits the body at each stop, and `resume()` jumps to the right
+The compiler splits `child` at each stop, and `resume()` jumps to the right
 piece.
 
 ```cpp
 struct child_frame {
   void (*resume)(child_frame*);    // what handle.resume() calls
   void (*destroy)(child_frame*);   // what handle.destroy() calls
-  promise_type promise;
-  /* parameter copies, locals and temporaries alive across a stop */
-  int stopped_at;                  // which co_await it stopped at
+  Promise<std::int32_t> promise;   // continuation_, starting_, value_
+  Depend<Loop> loop;               // parameter copies
+  std::int32_t file;
+  std::span<std::byte> buffer;
+  Read awaiter;                    // alive across the stop at co_await
+  int stopped_at;                  // 0, 1 or 2
 };
 
 void child_resume(child_frame* frame) {
   switch (frame->stopped_at) {
-    case 0: /* after initial_suspend */ ...
-    case 1: /* after the first co_await */ ...
+    case 0:   // stopped at initial_suspend: run the body up to co_await Read
+      ...     // C3: stopped_at = 1; await_suspend; return
+    case 1:   // stopped at co_await Read: the CQE arrived
+      ...     // await_resume, co_return (C5), then final_suspend:
+              // stopped_at = 2; FinalAwaiter hands control to parent
+    case 2:   // stopped at final_suspend: never resumed again, only destroyed
+      break;
   }
 }
 ```
 
-### C7. Destroying a frame
+`read` isn't in the frame: it is declared after the only stop, so it never
+lives across one.
+
+### C7. Destroying the frame
+
+`parent`'s statement `std::int32_t bytes = co_await child(...);` ends after the
+child finishes, and the `Task` temporary's destructor calls `handle.destroy()`
+on the child, which is stopped at `final_suspend`.
 
 ```cpp
-handle.destroy();
-// 1. Destroy the locals and temporaries alive at the point where it stopped.
-// 2. Destroy the promise.
-// 3. Destroy the parameter copies.
-// 4. Free the frame with the promise's operator delete, if it has one.
+child_destroy(frame);
+// 1. Destroy the locals and temporaries alive at final_suspend: none, since the
+//    body's scope has ended.
+// 2. Destroy the promise, and with it value_.
+// 3. Destroy the parameter copies: buffer, file, loop.
+// 4. Free the frame. Promise<std::int32_t> declares no operator delete, so the
+//    global one is used.
+::operator delete(frame);
 ```
 
 ## D. Where each piece lives, and for how long
@@ -520,7 +589,7 @@ The example from B, run from `main`.
 ```cpp
 int main() {
   Loop loop{*Ring::make(64)};
-  auto result = run(InOut(loop), parent(Depend(loop)));
+  auto result = run(InOut(loop), parent(Depend(loop), file));
 }
 ```
 
@@ -530,9 +599,9 @@ int main() {
 | t1 | `run` resumes the parent; the parent calls `child(...)`: the child's frame is created, and it stops at `initial_suspend` |
 | t2 | The parent awaits the child; the child starts and awaits `Read`, which takes an SQE and stops |
 | t3 | The kernel finishes the read; its CQE resumes the child |
-| t4 | The child returns 7 and reaches `final_suspend`, which resumes the parent |
+| t4 | The child returns the byte count and reaches `final_suspend`, which resumes the parent |
 | t5 | The parent's statement ends: the child's `Task` is destroyed, and with it the child's frame |
-| t6 | The parent returns 14 and reaches `final_suspend`; `run` reads the value |
+| t6 | The parent returns `bytes` and reaches `final_suspend`; `run` reads the value |
 | t7 | `run` returns, destroying the parent's `Task` and frame |
 
 ```
@@ -569,16 +638,16 @@ main      run()       parent          child           loop/kernel
  │          │ run_once ──────────────────────────────►│ submit and wait
  │          │         │               │                │ read finishes
  │          │         │               │◄── CQE: resume │
- │          │         │               │ co_return 7    │
+ │          │         │               │ co_return n    │
  │          │         │               │ final_suspend: │
  │          │         │◄─ symmetric transfer ─│        │
- │          │         │ value = 7     │                │
+ │          │         │ bytes = n     │                │
  │          │         │ destroy child frame            │
- │          │         │ co_return 14  │                │
+ │          │         │co_return bytes│                │
  │          │         │ final_suspend: continuation is noop
  │          │◄──────────────── (dispatch, run_once return)
- │          │ done: read 14           │                │
- │◄─── 14 ──│ destroy parent frame    │                │
+ │          │ done: read bytes        │                │
+ │◄─ bytes ─│ destroy parent frame    │                │
 ```
 
 ## G. How each customization point changes the sequence
