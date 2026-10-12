@@ -330,17 +330,17 @@ The rest of this section expands this coroutine, and a caller that uses it.
 The comments say which part expands where.
 
 ```cpp
+// Task<std::int32_t>::promise_type is the promise.
 auto child(Depend<Loop> loop, std::int32_t file,      // C1: calling it
            std::span<std::byte> buffer)
-    -> Task<std::int32_t> {                            // Task<std::int32_t>::promise_type
-                                                       // is the promise
-  // C2 wraps everything between the braces.
+    -> Task<std::int32_t> {                            // C2: the body starts here
   auto read = co_await Read{loop, file, buffer, 0};    // C3: co_await
   if (!read) {
     co_return -1;                                      // C5: co_return
   }
   co_return static_cast<std::int32_t>(*read);          // C5
-}                                                      // C6 splits the body at the co_await
+}                                                      // C2: the body ends here
+                                                       // C6 splits the body at the co_await
 
 auto parent(Depend<Loop> loop, std::int32_t file) -> Task<std::int32_t> {
   std::array<std::byte, 64> buffer;
