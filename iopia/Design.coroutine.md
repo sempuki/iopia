@@ -149,6 +149,50 @@ Lifecycle policy goes in the promise, and wait policy goes in the awaiter.
 "Resume on the loop that started me" is lifecycle policy. "Submit an SQE" is
 wait policy.
 
+### Which piece plays which `std::execution` role
+
+The promise is not the receiver. While a coroutine waits, the handle is what
+gets called back, so the handle plays the receiver, and the promise supplies
+the receiver's environment.
+
+| Coroutine piece | `std::execution` role |
+|---|---|
+| The awaitable expression, such as `Read{...}` before it is awaited | Sender |
+| The awaiter, while the coroutine is stopped | Operation state |
+| The coroutine handle, resumed with the result | Receiver |
+| The promise | The receiver's environment, and, for a task, where it keeps its parent's receiver |
+
+iopia's `Read` merges the first two rows. One object is the awaitable, its own
+awaiter, and the `Operation` whose address goes in `user_data`. A sender front
+end splits them: `Read` as a sender is a small copyable value, and `connect`
+builds the fixed-address operation state.
+
+`std::execution::task` shows the roles at work when a coroutine awaits a
+sender.
+
+```
+co_await sender   inside a std::execution::task
+  └─ as_awaitable builds an awaiter that holds
+       a receiver whose
+         set_value(v)  → store v in the awaiter, then handle.resume()
+         set_error(e)  → store e, then handle.resume()
+         set_stopped() → stop the coroutine
+         get_env()     → forward to the promise's environment
+       connect(sender, that receiver), the operation state
+  └─ await_suspend calls start on the operation state
+```
+
+**Seen from outside, the roles flip.** A whole task is a sender too, and
+iopia's `Task` becomes one in roadmap step 6.
+
+| Seen from outside | Coroutine |
+|---|---|
+| The sender | The `Task`, before it starts |
+| The operation state | The coroutine's frame |
+| `start` | `resume()` on the lazy task |
+| The receiver it completes into | The parent's continuation, kept in the promise |
+| `set_value(v)` | `co_return v`, after which `final_suspend` resumes the parent |
+
 ### The lifecycle, one hook per transition
 
 The promise's hooks sit on a five-state lifecycle.
