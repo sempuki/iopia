@@ -1,505 +1,630 @@
-# io_uring and C++ coroutines
+# io_uring, coroutines and std::execution
 
-This document explains how io_uring's concepts map onto C++ coroutines, for a
-reader who knows io_uring better than coroutines. It covers the coroutine
-machinery first, then a small model for reasoning about it, with C++26's
-`std::execution` terms beside the coroutine ones, then the mapping iopia
-uses, then each design decision the mapping raises, with the options and what
-they trade. [Design.md](Design.md)
-records the decisions themselves, and [Using.md](Using.md) shows the API.
+This document explains iopia's coroutine front-end for a reader who knows
+io_uring better than C++ coroutines. It introduces the three technologies,
+lines up their concepts, shows what the compiler does with a coroutine, where
+everything lives and for how long, and how each customization point changes
+the flow. Then it maps iopia's design onto those concepts and explains its
+choices. [Design.md](Design.md) records the decisions, and
+[Using.md](Using.md) shows the API.
 
-## Coroutines in brief
+Contents
 
-A coroutine is a function that can stop partway through and continue later.
-Any function whose body uses `co_await`, `co_yield` or `co_return` is one.
+- [A. What each one is](#a-what-each-one-is)
+- [B. Their core concepts, side by side](#b-their-core-concepts-side-by-side)
+- [C. What the compiler turns a coroutine into](#c-what-the-compiler-turns-a-coroutine-into)
+- [D. Where each piece lives, and for how long](#d-where-each-piece-lives-and-for-how-long)
+- [E. Lifetimes of a parent and child, from ordinary code and back](#e-lifetimes-of-a-parent-and-child-from-ordinary-code-and-back)
+- [F. The sequence of a parent and child, from ordinary code and back](#f-the-sequence-of-a-parent-and-child-from-ordinary-code-and-back)
+- [G. How each customization point changes the sequence](#g-how-each-customization-point-changes-the-sequence)
+- [H. How iopia maps onto these concepts, and the trade-offs](#h-how-iopia-maps-onto-these-concepts-and-the-trade-offs)
+- [I. Why iopia chose what it did](#i-why-iopia-chose-what-it-did)
 
-### The pieces
+## A. What each one is
 
-| Piece | What it is |
+**io_uring** is Linux's interface for asynchronous system calls. A program
+writes requests into a ring it shares with the kernel, and the kernel writes
+results into a second ring. Each request carries a 64-bit `user_data` that
+comes back with its result, so the program can tell which request finished.
+
+**C++ coroutines** (C++20) are functions that can stop partway through and
+continue later. The compiler turns the function into an object that holds its
+state, and code outside the coroutine decides when it continues. C++20
+supplies only the machinery. C++23 adds `std::generator`, and C++26 adds
+`std::execution::task`.
+
+**`std::execution`** (C++26) is a library model of asynchronous work. A
+*sender* describes work, a *receiver* is where its result goes, and
+algorithms such as `then` and `when_all` compose senders into bigger ones.
+
+How they relate:
+
+```
+                    your code
+          ┌───────────────┴────────────────┐
+     coroutines                      std::execution
+  (write async code               (compose async work
+   as straight-line code)          from senders)
+          └──── std::execution::task ──────┘
+                 (a coroutine that awaits
+                  senders and is a sender)
+                         │
+              something that completes later
+                         │
+                      io_uring
+          (the kernel completes requests, and
+           user_data says which one finished)
+```
+
+io_uring is the source of asynchronous events. Coroutines and
+`std::execution` are two ways to write code that waits on such a source.
+Each one turns "do this, then later continue with that" into something a
+person can read. `std::execution::task` joins the two.
+
+## B. Their core concepts, side by side
+
+### Each one is a callback, written differently
+
+All three come down to "do some work, and call me back when it finishes".
+`co_await x` hands `x` a callback whose body is the rest of the function, and
+the coroutine's handle is that callback.
+
+```
+callback style                     coroutine style
+──────────────                     ───────────────
+read(fd, buf, [&](int n) {         int n = co_await Read{...};
+  ...rest...                       ...rest...
+});
+```
+
+| Idea | io_uring | Callback style | Coroutine | `std::execution` |
+|---|---|---|---|---|
+| Describe the work | Prepare an SQE | The arguments to `read(...)` | The awaitable, such as `Read{...}` | A **sender** |
+| Register the callback | `user_data` | Pass the lambda | `await_suspend(handle)` | `connect(sender, receiver)`, which makes an **operation state** |
+| Begin the work | Submit | The call | Inside `await_suspend` | `start(operation_state)` |
+| Call back | A CQE arrives | Call the lambda | `handle.resume()` | `set_value`, `set_error` or `set_stopped` on the **receiver** |
+| Deliver the result | `res` | The lambda's argument | `await_resume()` | The arguments to `set_value` or `set_error` |
+| Cancel | `IORING_OP_ASYNC_CANCEL` | Library-specific | Library-specific | A **stop token**, and `set_stopped` |
+| Where code runs | The thread that reaps the CQ | Wherever the lambda is called | Wherever `resume()` is called | A **scheduler** |
+| Drive it from ordinary code | `io_uring_enter` in a loop | The library's event loop | A run function, such as iopia's `run` | `sync_wait` |
+
+SQE and CQE are the submission and completion queue entries, one per request
+and one per result.
+
+### Which piece plays which role
+
+| Coroutine piece | Scope | `std::execution` role |
+|---|---|---|
+| The awaitable expression, such as `Read{...}` | One wait | Sender |
+| The awaiter, while the coroutine is stopped | One wait | Operation state |
+| The coroutine handle, resumed with the result | One wait | Receiver |
+| The promise | The whole call | The receiver's environment (scheduler, stop token, allocator), and, for a task, where it keeps its parent's receiver |
+
+While a coroutine waits, its handle gets called back, so the handle plays the
+receiver. The promise holds policy for the whole call, and supplies what
+`std::execution` calls the environment.
+
+Seen from outside, a whole task is itself a sender.
+
+| Seen from outside | Coroutine |
 |---|---|
-| Frame | A heap block the compiler allocates for each call. It holds the parameters, the local variables, the promise, and the point where the coroutine stopped. |
-| Promise | An object of the type `promise_type`, which the return type names. The compiler calls its member functions at fixed points, and it is where a result is kept. |
-| Handle | `std::coroutine_handle<>`, a pointer to a frame. `resume()` continues the coroutine, `destroy()` frees the frame, and `done()` says whether it has finished. |
-| Awaiter | The object `co_await` works on. Its three member functions decide whether to stop, what to do on stopping, and what value the `co_await` produces. |
-| Return object | What the caller gets back from the call. Its type, the coroutine's return type, names the promise type, so it decides how the coroutine behaves. iopia's is `Task<T>`, which owns the handle. |
+| The sender | The task, before it starts |
+| The operation state | The coroutine's frame |
+| `start` | `resume()` on the lazy task |
+| The receiver it completes into | The parent's continuation, kept in the promise |
+| `set_value(v)` | `co_return v`, after which `final_suspend` resumes the parent |
 
 ### Lazy and eager
 
-A **lazy** coroutine doesn't run when it is called. The call creates its
-frame and returns, and the body starts only when something starts it, such as
-a parent that awaits it. An **eager** coroutine starts running its body as
-soon as it is called, and runs until its first stop before the call returns.
+A **lazy** coroutine doesn't run when it is called. The call creates its frame
+and returns, and the body starts only when something starts it. An **eager**
+coroutine runs its body as soon as it is called, until its first stop.
 
 ```cpp
 Task<int> task = child();   // lazy: nothing in child() has run yet
 int value = co_await task;  // now child() starts
 ```
 
-The promise's `initial_suspend` decides which, as the next sections show.
-iopia's `Task` is lazy, and so are `std::execution`'s senders and
-`std::execution::task`.
-
-### What `co_await` does
-
-The compiler turns `auto value = co_await expression;` into roughly this.
-
-```cpp
-auto&& awaiter = expression;            // or expression.operator co_await()
-if (!awaiter.await_ready()) {
-  // Save the coroutine's state into its frame.
-  // Call awaiter.await_suspend(this_coroutine's_handle), and:
-  //   returns void          -> stop, and return to whoever resumed us
-  //   returns true          -> stop, and return to whoever resumed us
-  //   returns false         -> don't stop after all; continue below at once
-  //   returns a handle h    -> stop, and resume h in our place
-  // <- resume() continues from here
-}
-auto value = awaiter.await_resume();
-```
-
-The awaiter is a temporary, and it lives in the frame from the start of the
-`co_await` to the end of it. While the coroutine is stopped, the awaiter stays
-at one address. That fact is the bridge to io_uring.
-
-### The promise's fixed points
-
-| The compiler calls | When |
-|---|---|
-| `get_return_object()` | At the start, to make the value the caller gets back. |
-| `initial_suspend()` | Before the body runs. An awaiter that stops makes the coroutine lazy. |
-| `return_value(v)` or `return_void()` | At `co_return`. |
-| `unhandled_exception()` | When an exception leaves the body. |
-| `final_suspend()` | After the body ends. An awaiter that stops keeps the frame alive, so someone can read the result and then `destroy()` it. |
-
-### Who runs what
-
-A coroutine never runs by itself. Some ordinary code calls `resume()`, the
-coroutine runs on that caller's stack until it stops, and then `resume()`
-returns. Whoever holds a handle decides when the coroutine continues. In
-iopia, the event loop holds the handles of stopped coroutines, indirectly,
-through `user_data`.
+iopia's `Task`, `std::execution`'s senders and `std::execution::task` are all
+lazy.
 
 ### Parents and children
 
-When one task `co_await`s another task, the awaiting task is the **parent**
-and the awaited task is the **child**.
+When one coroutine `co_await`s another, the awaiting one is the **parent** and
+the awaited one is the **child**. The child keeps the parent's handle as its
+**continuation**, and uses it to get the parent running again when it
+finishes. A child can be a parent too. The top task is started by ordinary
+code, such as `run()`, and has no parent.
 
 ```cpp
 auto child(Depend<Loop> loop) -> Task<std::int32_t> {
-  co_await Read{loop, file, buffer, 0};        // may stop on io_uring
+  co_await Read{loop, file, buffer, 0};
   co_return 7;
 }
 
 auto parent(Depend<Loop> loop) -> Task<std::int32_t> {
-  std::int32_t value = co_await child(loop);   // the parent awaits the child
+  std::int32_t value = co_await child(loop);
   co_return value * 2;
 }
 
-run(InOut(loop), parent(Depend(loop)));        // run() starts the top task
+auto result = run(InOut(loop), parent(Depend(loop)));
 ```
-
-```
-run()            drives the top task, which has no parent
- └─ parent       co_await child(loop)
-     └─ child    co_await Read{...}, which stops on io_uring
-```
-
-Tasks are lazy, so the parent starts the child. The child's promise keeps the
-parent's handle as its **continuation**, and when the child finishes it uses
-that handle to get the parent running again. A child can be a parent too, so
-the chain can be any depth. The top task's continuation is
-`std::noop_coroutine()`, a handle whose `resume()` does nothing, so when the
-top task finishes, control returns to `run()`.
-
-### Where frames live
-
-Every call to a coroutine allocates its own frame with `operator new`,
-children included. A parent's frame holds the child's `Task`, which is one
-pointer to the child's frame, and the awaiters it is stopped on, such as a
-`Read`. The child's frame is a separate heap block.
-
-The standard lets a compiler omit a frame's allocation when it can prove the
-frame never outlives its caller, and put the child's frame inside the
-parent's. This is heap allocation elision (HALO). The standard permits it but
-never requires it, and a task type that stores its handle and destroys it
-later, as iopia's does, usually stops the compiler from proving it. Clang 20
-and later offer an extension, `[[clang::coro_await_elidable]]` on the task
-type, which elides the frame of a call that is awaited at once.
-
-A parent that awaits ten children, with iopia's `Task`:
-
-| Build | Allocations |
-|---|---|
-| GCC or Clang, at `-O0` or `-O2` | 11, one per frame |
-| Clang at `-O0`, with `[[clang::coro_await_elidable]]` on `Task` | 11 |
-| Clang at `-O2`, with `[[clang::coro_await_elidable]]` on `Task` | 1, the children inside the parent |
-
-`std::execution` gets nesting by construction. `connect` builds a child's
-operation state inside its parent's, with no allocation, on every compiler.
-
-## How to think about the customization points
-
-The standard specifies the coroutine machinery hook by hook, in the order the
-compiler calls them, and leaves the model to the reader. Four ideas organize
-the hooks. Each idea also has a name in C++26's `std::execution`, which solves
-the same problem with senders and receivers, so this section gives both. Most
-of the model comes from Lewis Baker's "Asymmetric Transfer" articles and the
-work that led to `std::execution`.
-
-### A coroutine is a callback the compiler writes
-
-`co_await x` means "give `x` a callback, and the callback is the rest of this
-function". The coroutine's handle is that callback, and `resume()` calls it.
-
-```
-callback style                    coroutine style
-──────────────                    ───────────────
-read(fd, buf, [&](int n) {        int n = co_await Read{...};
-  ...rest...                      ...rest...
-});
-```
-
-`std::execution` names the callback a **receiver**. Its three member
-functions, `set_value`, `set_error` and `set_stopped`, are the three ways an
-operation can call back. io_uring has the same shape: an SQE with `user_data`
-registers a callback, and a CQE calls it.
-
-| Idea | io_uring | Callback style | Coroutine | `std::execution` |
-|---|---|---|---|---|
-| Describe the work | Prepare an SQE | The arguments to `read(...)` | The awaitable, such as `Read{...}` | A **sender** |
-| Register the callback | `user_data` | Pass the lambda | `await_suspend(handle)` | **`connect(sender, receiver)`**, which makes an **operation state** |
-| Begin the work | Submit | The call itself | Inside `await_suspend` | **`start(operation_state)`** |
-| Call back | A CQE | Call the lambda | `handle.resume()` | `set_value`, `set_error` or `set_stopped` on the receiver |
-| Deliver the result | `res` | The lambda's argument | `await_resume()` | The arguments to `set_value` or `set_error` |
-
-So designing coroutine support mostly means designing a callback API. Who
-calls back, on which thread, inline or deferred, how many times, and how
-errors arrive. io_uring already answers those for its operations, which is
-why the mapping below is so direct.
-
-### Two scopes: the whole call, and one wait
-
-Each customization point belongs to one of two objects, and the object tells
-you its scope.
-
-| Object | Scope | It decides | `std::execution` |
-|---|---|---|---|
-| **Promise**, chosen by the return type | The whole call, from start to finish | How the coroutine starts and ends, where its value and errors go, where its frame lives, and what it allows inside it | The **environment** a receiver carries (`get_env`: the scheduler, the stop token, the allocator), and `std::execution::task`'s promise |
-| **Awaiter**, one per `co_await` | One wait | Whether to stop, whom to hand the callback to, and what value comes back | The **operation state** that `connect` makes, one per operation |
-
-Lifecycle policy goes in the promise, and wait policy goes in the awaiter.
-"Resume on the loop that started me" is lifecycle policy. "Submit an SQE" is
-wait policy.
-
-### Which piece plays which `std::execution` role
-
-The promise is not the receiver. While a coroutine waits, the handle is what
-gets called back, so the handle plays the receiver, and the promise supplies
-the receiver's environment.
-
-| Coroutine piece | `std::execution` role |
-|---|---|
-| The awaitable expression, such as `Read{...}` before it is awaited | Sender |
-| The awaiter, while the coroutine is stopped | Operation state |
-| The coroutine handle, resumed with the result | Receiver |
-| The promise | The receiver's environment, and, for a task, where it keeps its parent's receiver |
-
-iopia's `Read` merges the first two rows. One object is the awaitable, its own
-awaiter, and the `Operation` whose address goes in `user_data`. A sender front
-end splits them: `Read` as a sender is a small copyable value, and `connect`
-builds the fixed-address operation state.
-
-`std::execution::task` shows the roles at work when a coroutine awaits a
-sender.
-
-```
-co_await sender   inside a std::execution::task
-  └─ as_awaitable builds an awaiter that holds
-       a receiver whose
-         set_value(v)  → store v in the awaiter, then handle.resume()
-         set_error(e)  → store e, then handle.resume()
-         set_stopped() → stop the coroutine
-         get_env()     → forward to the promise's environment
-       connect(sender, that receiver), the operation state
-  └─ await_suspend calls start on the operation state
-```
-
-**Seen from outside, the roles flip.** A whole task is a sender too, and
-iopia's `Task` becomes one in roadmap step 6.
-
-| Seen from outside | Coroutine |
-|---|---|
-| The sender | The `Task`, before it starts |
-| The operation state | The coroutine's frame |
-| `start` | `resume()` on the lazy task |
-| The receiver it completes into | The parent's continuation, kept in the promise |
-| `set_value(v)` | `co_return v`, after which `final_suspend` resumes the parent |
-
-### The lifecycle, one hook per transition
-
-The promise's hooks sit on a five-state lifecycle.
-
-```
- create ──► start ──► (stop ⇄ resume)* ──► finish ──► destroy
-   │          │              │                │           │
-get_return_ initial_    each co_await    return_value,  handle
-object,     suspend     (the awaiter's   unhandled_     .destroy()
-operator new            three hooks)     exception,
-                                         final_suspend
-```
-
-| Transition | Hook | The question it answers | `std::execution` |
-|---|---|---|---|
-| create | `operator new`, `get_return_object` | Where does the frame live, and what does the caller hold? | `connect` builds the operation state, inside the caller's own operation state, with no allocation |
-| start | `initial_suspend` | Does the body run now, or wait to be started? | Senders are always lazy: nothing runs until `start` |
-| each wait | `await_transform` (optional) | Does the promise rewrite every `co_await` in its body? | `std::execution::task` uses it to await senders and to come back on its scheduler |
-| finish | `return_value`, `return_void`, `unhandled_exception` | Where do the result and errors go? | `set_value` and `set_error` on the receiver |
-| finish | `final_suspend` | Who runs next, and who frees the frame? | The receiver's completion runs next; the operation state is freed by whoever owns it |
 
 ### Custody: one owner at a time
 
 At every moment, exactly one party is responsible for a stopped coroutine's
-handle, and that party will resume it or destroy it. Every hook that stops the
-coroutine transfers that custody, and `await_suspend` is where the transfer
-happens.
+handle, and that party will resume it or destroy it. Every stop hands custody
+to someone, such as the kernel through `user_data`, a parent, or a queue.
+`std::execution` has the same rule for an operation state: once started, it
+stays alive at one address until it calls its receiver exactly once.
 
-| `await_suspend` returns | Custody goes to | What runs next on this thread |
-|---|---|---|
-| `void` or `true` | Whoever `await_suspend` gave the handle to: the kernel through `user_data`, a queue, another task | Whoever resumed the coroutine gets control back |
-| `false` | Nobody, because the coroutine never really stopped | The coroutine, at once |
-| a handle `h` | Whoever `await_suspend` gave the handle to | `h` (symmetric transfer) |
-
-`std::execution` states the same rule for an operation state. Once `start`
-is called, the operation state must stay alive, at a fixed address, until it
-calls one of its receiver's three functions, exactly once. iopia's
-`Operation` follows the same rule, which is why an awaiter and a sender's
-operation state can both be one.
-
-Most coroutine bugs are custody bugs.
-
-- **Nobody holds the handle.** The coroutine never resumes, and its frame
-  leaks.
-- **Two parties hold it.** It is resumed twice, or resumed after being
-  destroyed.
-- **The holder outlives the frame.** The kernel still holds `user_data` when
-  a waiting task is destroyed (decision 9).
-
-### A procedure for a new design
-
-1. **Write down the primitive's callback contract.** Who calls back, on which
-   thread, inline or deferred, and how many times. For io_uring, the loop
-   calls back once per CQE (more for multishot), inline, on the ring's thread.
-2. **Write the awaiter from that contract.** `await_suspend` gives the handle
-   to whatever calls back, and its return type comes from the custody table.
-   In `std::execution` terms, this is writing the sender and its operation
-   state.
-3. **Answer the lifecycle table in the promise.** Choose lazy or eager first,
-   since it decides whether a parent can give the child its continuation
-   before the child runs. Then decide who frees the frame, then where results
-   and errors go.
-4. **Check custody at every arrow** of the lifecycle. An arrow that leaves no
-   owner, or two, is a bug.
-
-The remaining hooks (`yield_value`, `operator co_await`,
-`get_return_object_on_allocation_failure`) are extensions to reach for when a
-goal calls for them.
+| Custody bug | What happens |
+|---|---|
+| Nobody holds the handle | The coroutine never resumes, and its frame leaks |
+| Two parties hold it | It is resumed twice, or after it was destroyed |
+| The holder outlives the frame | The kernel completes into freed memory |
 
 ### Where coroutines and `std::execution` differ
 
 | | Coroutines | `std::execution` |
 |---|---|---|
-| Storage | A heap frame per call, unless the compiler elides it | Operation states nest inside each other, sized at compile time, with no allocation |
-| Errors | Whatever the promise chooses; iopia uses `std::expected` | Three channels: value, error and stopped |
-| Cancellation | Whatever the promise and awaiters choose | Built in: a stop token in the environment, and `set_stopped` |
-| Inline completion | A child that finishes inside its parent's `resume()` can grow the stack (decision 3) | A sender that completes inside `start` can grow the stack in the same way, and schedulers trampoline to bound it |
-| Running from ordinary code | `run(InOut(loop), task)` | `sync_wait(sender)` |
+| Storage | A frame per call, on the heap unless elided | Operation states nest inside each other, sized at compile time, with no allocation |
+| Errors | Whatever the promise chooses | Three channels: value, error and stopped |
+| Cancellation | Whatever the promise and awaiters choose | Built in, through stop tokens |
+| Completing inline | A child that finishes inside its parent's `resume()` can grow the stack | A sender that completes inside `start` can too; schedulers trampoline to bound it |
 
-## The mapping
+## C. What the compiler turns a coroutine into
+
+A function becomes a coroutine when its body uses `co_await`, `co_yield` or
+`co_return`. The return type names the promise type through
+`std::coroutine_traits<Return, Arguments...>::promise_type`, which by default
+is `Return::promise_type`.
+
+### C1. The call
+
+Calling the coroutine runs roughly this, before any of the body.
+
+```cpp
+auto child(Arguments... arguments) -> Task<T> {
+  // 1. Allocate the frame. The promise's operator new is used if it has one,
+  //    first trying operator new(size, arguments...).
+  void* frame = promise_type::operator new(frame_size);
+  // If the promise has get_return_object_on_allocation_failure(), the
+  // allocation uses nothrow new, and a null frame returns that object instead.
+
+  // 2. Copy the parameters into the frame. By-value parameters are moved or
+  //    copied. Reference parameters stay references.
+  // 3. Construct the promise in the frame, from the parameter copies if it has
+  //    a matching constructor, otherwise by default.
+  // 4. Make the object the caller gets back.
+  auto return_object = promise.get_return_object();
+  // 5. Run the body (C2). The call returns return_object to the caller at the
+  //    coroutine's first stop, or when it finishes.
+}
+```
+
+### C2. The body
+
+```cpp
+{
+  try {
+    co_await promise.initial_suspend();       // lazy coroutines stop here
+    /* the function body */
+  } catch (...) {
+    if (/* initial_suspend's await_resume hasn't run */) throw;
+    promise.unhandled_exception();
+  }
+final_suspend:
+  co_await promise.final_suspend();           // must not throw
+  // If final_suspend didn't stop, the frame is destroyed here (C7).
+}
+```
+
+### C3. `co_await expression`
+
+```cpp
+// a. The promise may rewrite the expression.
+auto&& awaitable = promise.await_transform(expression);  // only if the promise
+                                                          // declares await_transform
+// b. The awaitable may supply a separate awaiter.
+auto&& awaiter = awaitable.operator co_await();  // or a free operator co_await,
+                                                 // or the awaitable itself
+// c. The three hooks.
+if (!awaiter.await_ready()) {
+  // Save the state into the frame, and note where to resume.
+  auto next = awaiter.await_suspend(this_handle);
+  //   void            -> stop, and return to whoever resumed this coroutine
+  //   bool true       -> the same
+  //   bool false      -> don't stop; continue below at once
+  //   handle h        -> stop, and resume h instead (symmetric transfer)
+  //   throws          -> don't stop; the exception leaves the co_await
+  // <- resume() continues here
+}
+auto value = awaiter.await_resume();
+```
+
+`initial_suspend`, `final_suspend` and `yield_value` results skip step a.
+
+### C4. `co_yield value`
+
+```cpp
+co_await promise.yield_value(value);
+```
+
+### C5. `co_return`
+
+```cpp
+co_return value;   // -> promise.return_value(value); goto final_suspend;
+co_return;         // -> promise.return_void();       goto final_suspend;
+// Falling off the end -> promise.return_void(), if the promise has it;
+//                        otherwise undefined behavior.
+```
+
+### C6. The state machine
+
+The compiler splits the body at each stop, and `resume()` jumps to the right
+piece.
+
+```cpp
+struct child_frame {
+  void (*resume)(child_frame*);    // what handle.resume() calls
+  void (*destroy)(child_frame*);   // what handle.destroy() calls
+  promise_type promise;
+  /* parameter copies, locals and temporaries alive across a stop */
+  int stopped_at;                  // which co_await it stopped at
+};
+
+void child_resume(child_frame* frame) {
+  switch (frame->stopped_at) {
+    case 0: /* after initial_suspend */ ...
+    case 1: /* after the first co_await */ ...
+  }
+}
+```
+
+### C7. Destroying a frame
+
+```cpp
+handle.destroy();
+// 1. Destroy the locals and temporaries alive at the point where it stopped.
+// 2. Destroy the promise.
+// 3. Destroy the parameter copies.
+// 4. Free the frame with the promise's operator delete, if it has one.
+```
+
+## D. Where each piece lives, and for how long
+
+| Piece | Lives in | From | Until |
+|---|---|---|---|
+| Frame | The heap, unless elided into the caller's frame (HALO) | The call | `handle.destroy()`, or the end of `final_suspend` if it doesn't stop |
+| Promise | The coroutine's own frame | The call | The frame's destruction |
+| Parameter copies | The coroutine's own frame | The call | The frame's destruction |
+| Reference parameters | Wherever the caller's object is | The caller decides | The caller's object's lifetime, which can end before the coroutine does |
+| Locals | The frame, if alive across a stop; otherwise the stack | Their declaration | Their scope's end |
+| An awaiter for `co_await Read{...}` | The awaiting coroutine's frame | The `co_await` | The end of the full-expression, usually the statement |
+| An awaiter that is a named variable | The awaiting coroutine's frame | Its declaration | Its scope's end |
+| The return object (`Task`) | Wherever the caller puts it | The call | The caller's choice; iopia's `Task` destroys the frame with it |
+| The handle | Anywhere; it is one pointer | `from_promise`, or the frame's creation | Valid until the frame is destroyed |
+| The result | The promise | `return_value` | Read by the parent's `await_resume`, then destroyed with the frame |
+| io_uring's `user_data` | The kernel | `await_suspend` prepares the SQE | The CQE |
+
+A frame laid out by a typical compiler:
+
+```
+child's frame
+┌───────────────────────────────────────┐
+│ resume function pointer               │
+│ destroy function pointer              │
+│ promise                               │  continuation_, value_, starting_
+│ parameter copies                      │
+│ locals and temporaries alive at stops │  including an awaiter such as Read
+│ which point it stopped at             │
+└───────────────────────────────────────┘
+```
+
+The standard lets a compiler put a child's frame inside its parent's when it
+can prove the child never outlives the parent (heap allocation elision,
+HALO). It permits this and never requires it. A parent that awaits ten
+children, with iopia's `Task`:
+
+| Build | Allocations |
+|---|---|
+| GCC or Clang, at `-O0` or `-O2` | 11, one per frame |
+| Clang at `-O0`, with `[[clang::coro_await_elidable]]` on `Task` | 11 |
+| Clang at `-O2`, with `[[clang::coro_await_elidable]]` on `Task` | 1, every child inside the parent |
+
+## E. Lifetimes of a parent and child, from ordinary code and back
+
+The example from B, run from `main`.
+
+```cpp
+int main() {
+  Loop loop{*Ring::make(64)};
+  auto result = run(InOut(loop), parent(Depend(loop)));
+}
+```
+
+| Time | Event |
+|---|---|
+| t0 | `main` calls `parent(...)`: the parent's frame and promise are created, and the lazy parent stops at `initial_suspend` |
+| t1 | `run` resumes the parent; the parent calls `child(...)`: the child's frame is created, and it stops at `initial_suspend` |
+| t2 | The parent awaits the child; the child starts and awaits `Read`, which takes an SQE and stops |
+| t3 | The kernel finishes the read; its CQE resumes the child |
+| t4 | The child returns 7 and reaches `final_suspend`, which resumes the parent |
+| t5 | The parent's statement ends: the child's `Task` is destroyed, and with it the child's frame |
+| t6 | The parent returns 14 and reaches `final_suspend`; `run` reads the value |
+| t7 | `run` returns, destroying the parent's `Task` and frame |
+
+```
+              t0    t1    t2    t3    t4    t5    t6    t7
+main          ██████████████████████████████████████████████
+run()               ████████████████████████████████████████
+parent frame  ██████████████████████████████████████████
+child frame         ████████████████████████
+Read awaiter              ████████████
+SQE in kernel             ██████
+```
+
+## F. The sequence of a parent and child, from ordinary code and back
+
+```
+main      run()       parent          child           loop/kernel
+ │ parent()           │               │                │
+ │──────────────────► create frame, initial_suspend: stop
+ │◄───────── Task ────│               │                │
+ │ run(loop, Task)    │               │                │
+ │─────────►│ resume()│               │                │
+ │          │────────►│ child()       │                │
+ │          │         │──────────────►create frame, stop
+ │          │         │◄──── Task ────│                │
+ │          │         │ co_await Task: await_suspend   │
+ │          │         │ continuation = parent          │
+ │          │         │ resume() ────►│                │
+ │          │         │               │ co_await Read: │
+ │          │         │               │ take SQE ─────►│ user_data = &Read
+ │          │         │               │ stop           │
+ │          │         │◄──────────────│ (resume returns)
+ │          │         │ child not done: stop           │
+ │          │◄────────│ (resume returns)               │
+ │          │ run_once ──────────────────────────────►│ submit and wait
+ │          │         │               │                │ read finishes
+ │          │         │               │◄── CQE: resume │
+ │          │         │               │ co_return 7    │
+ │          │         │               │ final_suspend: │
+ │          │         │◄─ symmetric transfer ─│        │
+ │          │         │ value = 7     │                │
+ │          │         │ destroy child frame            │
+ │          │         │ co_return 14  │                │
+ │          │         │ final_suspend: continuation is noop
+ │          │◄──────────────── (dispatch, run_once return)
+ │          │ done: read 14           │                │
+ │◄─── 14 ──│ destroy parent frame    │                │
+```
+
+## G. How each customization point changes the sequence
+
+Most to least commonly customized.
+
+### G1. `await_suspend`'s return value
+
+```
+returns true or void           returns false               returns handle h
+────────────────────           ─────────────               ────────────────
+coroutine stops                coroutine never stops       coroutine stops
+resume() returns to            continues at once with      h.resume() runs in its
+whoever resumed it             await_resume()              place, as a tail call
+                                                           when the compiler makes one
+used: started async work       used: work finished         used: hand over to another
+(iopia's Read)                 synchronously, or no SQE    coroutine (a parent)
+```
+
+### G2. `initial_suspend`: lazy or eager
+
+```
+lazy (suspend_always)                   eager (suspend_never)
+caller ── child() ──► frame, stop       caller ── child() ──► frame, body runs
+caller ◄── Task ─────                   ...until the first stop
+caller ── co_await ──► body runs        caller ◄── Task ─────
+                                        caller ── co_await ──► finished already?
+                                        needs a handshake over who resumes whom
+```
+
+### G3. `final_suspend`
+
+```
+returns the continuation         suspend_always                suspend_never
+(symmetric transfer)             (and the owner destroys it)   (self-destroys)
+child ──► parent resumes         child stops; resume()         child's frame is freed;
+                                 returns to its resumer        resume() returns
+used: tasks                      used: generators, run()       used: fire-and-forget
+                                 reading the result            coroutines, no result
+```
+
+### G4. `await_ready`
+
+```
+returns true: skip the stop entirely, go straight to await_resume.
+used: the result is already available, so no frame save and no custody handoff.
+```
+
+### G5. `return_value` and `unhandled_exception`
+
+```
+co_return v ──► promise.return_value(v) stores v ──► final_suspend
+throw       ──► promise.unhandled_exception()
+                  stores it, to rethrow in the parent's await_resume
+                  or calls std::terminate (iopia)
+```
+
+### G6. `await_transform`
+
+```
+co_await x ──► promise.await_transform(x) ──► the awaiter actually used
+used: std::execution::task turns every sender into an awaiter, then resumes
+      on its own scheduler (an extra hop when the completion ran elsewhere):
+
+task ── co_await sender ──► sender completes on another thread
+                             ──► schedule back onto the task's scheduler ──► task resumes
+```
+
+### G7. `yield_value`
+
+```
+consumer                       generator
+ │ ++iterator ─ resume() ─────► runs to co_yield v
+ │                              yield_value(v): store v, stop
+ │◄─────────────────────────── resume returns
+ │ reads v                      (repeats until co_return)
+```
+
+### G8. `operator co_await`
+
+Changes which object is the awaiter, and leaves the sequence as it is.
+iopia's `Task` uses it, so `co_await task` gets a dedicated awaiter that
+starts the child.
+
+### G9. Allocation: `operator new`, `get_return_object_on_allocation_failure`
+
+Changes where the frame comes from, and leaves the sequence as it is.
+
+## H. How iopia maps onto these concepts, and the trade-offs
 
 | io_uring | Coroutine | `std::execution` | iopia |
 |---|---|---|---|
-| Preparing a submission queue entry (SQE) | `await_suspend` | `start` on the operation state | `internal::Awaitable::await_suspend` takes an SQE and prepares it. |
-| `user_data` | The awaiter's address | The operation state's address | Each awaiter is an `Operation`, and `user_data` points at it. |
-| Waiting for completions (`io_uring_enter`) | Code outside any coroutine | A run loop, or `sync_wait` | `run()` and `Loop::run_once()`. |
-| A completion queue entry (CQE) | Resuming the coroutine | Calling the receiver | The `Operation`'s `complete` stores `res` and calls `resume()`. |
-| `res` | `await_resume`'s value | `set_value` or `set_error` | Turned into `std::expected<T, lib::Status>`. |
-| The operation's lifetime | The awaiter's lifetime in the frame | The operation state's lifetime | Fixed address from `await_suspend` until `await_resume`. |
-| Multishot (several completions) | No direct match | No direct match; a sender completes once | Not supported yet. See below. |
-| Linked SQEs (`IOSQE_IO_LINK`) | No direct match | Sequencing, such as `let_value` | Not supported yet. |
-| Cancellation (`ASYNC_CANCEL`) | No direct match | A stop token, and `set_stopped` | Roadmap step 7. |
+| Prepare an SQE | `await_suspend` | `start` | `internal::Awaitable::await_suspend` takes an SQE and prepares it |
+| `user_data` | The awaiter's address | The operation state's address | Each awaiter is an `Operation`, and `user_data` points at it |
+| `io_uring_enter` | Code outside any coroutine | `sync_wait` | `run()` and `Loop::run_once()` |
+| A CQE | `resume()` | Calling the receiver | `Operation::complete` stores `res` and calls `resume()` |
+| `res` | `await_resume`'s value | `set_value` or `set_error` | `std::expected<T, lib::Status>` |
+| The operation's lifetime | The awaiter's lifetime | The operation state's lifetime | From `await_suspend` to `await_resume` |
+| Multishot | No direct match | No direct match | Not supported yet |
+| Linked SQEs | No direct match | Sequencing, such as `let_value` | Not supported yet |
+| Cancellation | No direct match | Stop tokens | Roadmap step 7 |
 
-### One read, step by step
+iopia's `Read` is the awaitable, its own awaiter and the `Operation` at once.
+A sender front end splits it: a copyable sender, and a fixed-address
+operation state that `connect` builds.
+
+Each decision below lists its options and what they trade, with iopia's
+choice in bold. Section I gives the reasons.
+
+| # | Question | Options and trades |
+|---|---|---|
+| 1 | Where the awaiter finds its loop | **Passed in**: explicit; works in any coroutine type; every call names the loop. *In the promise*: shorter calls; the awaiter works only in iopia's `Task`. *Thread-local*: shortest; hidden, and wrong with two loops. |
+| 2 | Lazy or eager | **Lazy**: the parent sets its continuation before the child runs. *Eager*: starts sooner; needs a handshake, and runs even if never awaited. |
+| 3 | How a finished child resumes its parent | *`resume()`*: grows the stack. *Symmetric transfer*: flat if the compiler makes a tail call. **Return to the parent's `await_suspend` when finished before stopping, symmetric transfer otherwise**: flat everywhere; a flag in the promise. |
+| 4 | Resume inline or queued | **Inline**: lowest latency; the coroutine runs inside dispatch. *Queued*: bounded, fair dispatch; a queue and a second pass. |
+| 5 | Results and errors | **`std::expected<T, lib::Status>`**: explicit; propagation by hand. *Throw*: free propagation; iopia avoids exceptions. *Raw `res`*: cheapest; every caller maps errno. |
+| 6 | A full submission queue | **Don't stop, report `BUSY`**: simple; callers need a plan. *Wait for space*: callers never see it; a wait queue in the loop. |
+| 7 | Where frames come from | **Default `operator new`**: nothing to write. *HALO*: free when it happens, rare without help. *A pool in the promise*: fast; size classes, and frames must not outlive it. |
+| 8 | Follow `std::execution::task` | **Own `Task`**: no sender code for coroutine users; needs a bridge. *Model it*: one set of operations; coroutine users compile senders. |
+| 9 | Destroying a task that waits on io_uring | **Forbid it**: nothing to write. *Cancel and wait in the destructor*: safe; the destructor runs the loop. *Detach the operation*: cheap; every awaiter must hand itself off. |
+| 10 | Multishot | *Re-arm per `co_await`*: fits today's awaiters. *An async stream*: keeps multishot's savings; needs a buffer. *Handlers*: already works with `Loop::queue`. |
+| 11 | Exceptions in tasks | **Terminate**: matches handlers. *Store and rethrow*: exceptions across `co_await`; an `exception_ptr` per task. |
+
+## I. Why iopia chose what it did
+
+### 1. The loop is passed in
+
+```cpp
+// Passed in (iopia): works in any coroutine type.
+co_await Read{loop, file, buffer, 0};
+
+// In the promise: await_suspend must name iopia's promise to find the loop.
+template <typename ValueType>
+auto await_suspend(std::coroutine_handle<internal::Promise<ValueType>> awaiting)
+    -> bool { Loop& loop = awaiting.promise().loop(); /* ... */ }
+```
+
+The awaiter takes a plain `std::coroutine_handle<>`, so it never depends on
+iopia's `Task`. Moving the loop into the promise stays open as a later
+convenience.
+
+### 2. Tasks are lazy
 
 ```
-task                       loop                          kernel
-────                       ────                          ──────
-co_await Read{...}
-  await_ready -> false
-  await_suspend(handle)
-    try_take_submission(this) ── SQE, user_data = &awaiter
-    io_uring_prep_read
-    remember handle
-    return true
-  (task stops; resume()
-   returns to run())
-                           run_once
-                             submit_and_wait(1) ───────► read runs
-                                                         CQE {user_data, res}
-                             take_completions ◄────────
-                             dispatch(CQE)
-                               awaiter.complete(CQE)
-                                 result_ = res
-  ◄───────────────────────────── handle.resume()
-  await_resume -> expected<bytes>
-  ... task continues until its next co_await
-                           (resume() returns; dispatch continues)
+lazy:   parent sets continuation ──► then starts child ──► child can always resume it
+eager:  child may finish ──► before parent has a continuation to give ──► handshake
 ```
 
-The awaiter needs no allocation of its own. The frame already holds it, at a
-fixed address, for exactly as long as the kernel holds `user_data`.
+### 3. A child that finishes early returns to its parent's `await_suspend`
 
-## Design decisions
+```
+a loop over children that finish without stopping, with plain resume():
+  parent ─ resume ─► child1 ─ resume ─► parent ─ resume ─► child2 ─ ...   stack grows
+  1,000,000 children overflowed GCC 16 at -O0, where symmetric transfer isn't a tail call
 
-Each section lists the options, what each trades, and what iopia does today.
+iopia:
+  parent.await_suspend ─ resume ─► child1 finishes ─► returns false ─► parent continues
+  stack stays flat on every compiler and optimization level
+```
 
-### 1. Where the awaiter finds its loop
+```cpp
+auto await_suspend(std::coroutine_handle<> awaiting) noexcept -> bool {
+  promise.continuation_ = awaiting;
+  promise.starting_ = true;
+  coroutine.resume();                 // the child runs until it stops or finishes
+  promise.starting_ = false;
+  return !coroutine.done();           // finished: don't stop the parent
+}
+```
 
-*Scope: is finding the loop wait policy (the awaiter) or lifecycle policy (the promise)?*
+### 4. Completions resume inline
 
-`await_suspend` needs a loop to take an SQE from.
+```
+CQE ──► dispatch ──► Operation::complete ──► handle.resume() ──► coroutine runs
+no queue, no second pass: the coroutine continues in the same call as the completion
+```
 
-| Option | Trade |
-|---|---|
-| **Pass it in:** `Read{Depend(loop), ...}` (iopia today) | Explicit and simple. `await_suspend` takes a `std::coroutine_handle<>` and never looks at the promise, so an awaiter works in a coroutine of any return type, such as iopia's `Task`, `std::generator` or another library's task. Every call names the loop. |
-| **Keep it in the task's promise.** `run()` gives the top task a loop, each child inherits it, and `await_suspend` reads it from the awaiting coroutine's promise. `std::execution::task` does this with its scheduler. | Calls read `co_await Read{file, buffer, 0}`. `await_suspend` must name iopia's promise type to reach the loop, so the awaiter only works inside iopia's `Task`, and the promise grows by a pointer. |
-| **A thread-local current loop.** | Shortest calls. Hidden state, and wrong as soon as a task touches two loops. |
+### 5. Results are `std::expected`
 
-### 2. Lazy or eager tasks
+```cpp
+auto read = co_await Read{loop, file, buffer, 0};
+if (!read) {
+  co_return Failure{std::move(read).error()};   // propagation is visible
+}
+```
 
-*Lifecycle: the start transition, `initial_suspend`.*
+iopia doesn't use exceptions, and handlers already can't throw.
 
-| Option | Trade |
-|---|---|
-| **Lazy** (iopia today): `initial_suspend` stops, and the task starts when awaited or run. | The parent sets its continuation before the child runs, so the child always knows whom to resume. A task can be created and passed around before it starts. |
-| **Eager:** the body runs as soon as it's called. | Starts work sooner. A child can finish before its parent awaits it, so the parent and child need a handshake over who resumes whom. A task that is never awaited still runs. |
+### 6. A full queue reports `BUSY`
 
-### 3. How a finished child resumes its parent
+```
+await_suspend ──► try_take_submission ──► null ──► return false ──► await_resume: BUSY
+the caller decides: retry, back off, or fail
+```
 
-*Custody: at the finish transition, who gets the parent's handle, and on which stack.*
+### 7. Frames use the default allocator
 
-When a child task finishes, its parent must continue. The child's
-`final_suspend` awaiter decides how.
+No allocator to write yet. Clang's `[[clang::coro_await_elidable]]` cut ten
+child frames to none at `-O2` (D), which makes it the cheapest next step.
 
-| Option | Trade |
-|---|---|
-| **Call `parent.resume()`** from the child's final suspend. | Simple. Each finish adds a stack frame under the one that resumed the child, so a loop over many children grows the stack until it overflows. |
-| **Symmetric transfer:** `await_suspend` returns the parent's handle. | The compiler should turn this into a tail call, so the stack stays flat. The standard doesn't require the tail call, and GCC 16 at `-O0` (Bazel's default build) doesn't make it. A test of a million children overflowed the stack there. |
-| **Return to the parent's `await_suspend`** (iopia today, for a child that finishes before it stops). The parent starts the child with `resume()`. If the child finishes during that call, its final suspend returns there, and the parent's `await_suspend` returns `false`, so the parent continues without being resumed. | Flat stack on every compiler and optimization level. Needs a flag in the promise to tell the two cases apart. A child that stops on io_uring still uses symmetric transfer when it finishes later. |
+### 8. iopia's own `Task`
 
-### 4. Resuming inline or from a queue
+```
+program using only coroutines:  task.hpp + awaitable.hpp   no sender code compiled
+program using only senders:     (step 5) sender headers     no coroutine task compiled
+both:                           (step 6) a bridge
+```
 
-*Callback contract: does the callback run inline or deferred?*
+### 9. Destroying a waiting task is forbidden
 
-A completion arrives inside `Loop::run_once()`'s dispatch.
+```
+destroy frame ──► Read awaiter freed ──► kernel still has user_data = &Read ──► CQE ──► use after free
+```
 
-| Option | Trade |
-|---|---|
-| **Resume inline** (iopia today): `complete` calls `resume()` directly. | No extra hop, so the lowest latency. The coroutine runs inside dispatch, until its next `co_await`, before the next completion is handled. |
-| **Queue the handle**, and resume queued handles after dispatch. | Every completion in a batch is handled before any coroutine runs, which bounds how long dispatch takes and makes the order fair. Costs a queue and a second pass. |
+Cancellation (roadmap step 7) is the tool any safe alternative needs, so the
+rule waits for it.
 
-### 5. How results and errors come back
+### 10. Multishot waits
 
-*Lifecycle: the finish transition, and `await_resume`'s value.*
+Each option needs either new awaiters or a buffer policy. Handlers already
+cover multishot through `Loop::queue`.
 
-| Option | Trade |
-|---|---|
-| **`std::expected<T, lib::Status>` from `await_resume`** (iopia today) | Errors are values and the caller must look at them. A task that just propagates an error writes it out by hand. |
-| **Throw from `await_resume`** | Propagation is free in the source. iopia avoids exceptions, and handlers already can't throw. |
-| **Return `res` raw** | Cheapest. Every caller repeats the `res < 0` check and the errno mapping. |
+### 11. Exceptions terminate
 
-Making a `lib::Status` formats a message, so an error costs a string. A
-success costs nothing extra.
-
-### 6. When the submission queue is full
-
-*Custody: `await_suspend` returning `false` keeps the handle.*
-
-`Loop::try_take_submission` already submits what the queue holds and tries once
-more. If it still has no SQE, the awaiter must do something.
-
-| Option | Trade |
-|---|---|
-| **Don't stop, and report `BUSY`** (iopia today): `await_suspend` returns `false`. | Simple, and the caller decides what to do. Every caller needs a plan for `BUSY`. |
-| **Stop, and wait for space.** Put the awaiter on a queue the loop drains after each batch. | Callers never see `BUSY`. The loop gains a wait queue, and awaiters gain a second state. |
-
-### 7. Where frames come from
-
-*Lifecycle: the create transition, `operator new`.*
-
-Every task call allocates its frame with `operator new`.
-
-| Option | Trade |
-|---|---|
-| **The default allocator** (iopia today) | Nothing to write. One allocation and one free per task. |
-| **Allocation elision (HALO).** The compiler may put a child's frame inside its parent's when it can prove the child's lifetime is nested. | Free when it happens. Without help, neither GCC nor Clang elided any of iopia's child frames. Clang's `[[clang::coro_await_elidable]]` on `Task` elided all of them at `-O2`. GCC has no equivalent, and nothing is elided at `-O0`. |
-| **A custom `operator new` in the promise**, taking frames from a per-loop pool. | Fast, and fits one ring per thread. Frame sizes vary, so the pool needs size classes, and a frame must not outlive its pool. |
-
-### 8. Following `std::execution::task`
-
-*Scope: what the promise allows inside it, through `await_transform`.*
-
-| Option | Trade |
-|---|---|
-| **iopia's own `Task<T>`** (iopia today) | Uses only `<coroutine>`, so coroutine users compile no sender code. The two front-ends need a bridge (roadmap step 6). |
-| **Model `Task<T>` on `std::execution::task`**, which awaits senders. | One set of operations, as senders, serves both front-ends. Coroutine users compile the sender machinery. |
-
-### 9. Destroying a task that is waiting on io_uring
-
-*Custody: the kernel holds the handle when the frame goes away.*
-
-The kernel holds the address of an awaiter in the task's frame. Destroying the
-frame early leaves the kernel pointing at freed memory.
-
-| Option | Trade |
-|---|---|
-| **Forbid it** (iopia today) | Nothing to write. The rule is the caller's to keep. |
-| **Cancel, then wait, in the destructor.** Submit `ASYNC_CANCEL` for the operation and run the loop until its completion arrives. | Always safe. A destructor that runs the loop can call other handlers, at a point the caller didn't expect. |
-| **Detach the operation.** Move what the kernel uses into a loop-owned node and let the frame go. | Destruction stays cheap. Every awaiter must be able to hand itself off, and the kernel's buffers must outlive the frame too. |
-
-### 10. Multishot operations
-
-*Callback contract: how many times the callback runs.*
-
-A multishot operation, such as multishot receive or accept, completes many
-times, and one `co_await` resumes once.
-
-| Option | Trade |
-|---|---|
-| **Re-arm a single-shot operation per `co_await`** | Fits today's awaiters. Loses multishot's saving of one submission per completion. |
-| **An async stream:** `co_await stream.next()` in a loop. The operation buffers completions that arrive while no one waits. | Keeps multishot's saving. Needs a buffer, and a rule for when it fills. |
-| **Handlers, not coroutines** | Already works with `Loop::queue`. Leaves the coroutine style. |
-
-### 11. Exceptions inside tasks
-
-*Lifecycle: the finish transition, `unhandled_exception`.*
-
-| Option | Trade |
-|---|---|
-| **Terminate** (iopia today): `unhandled_exception` calls `std::terminate`. | Matches handlers, which can't throw. A bug stops the program at once. |
-| **Store the exception** in the promise and rethrow it from the parent's `await_resume`. | Exceptions work across `co_await`. Costs an `std::exception_ptr` per task and a check on every resume. |
-
-## Summary of today's choices
-
-| Question | iopia today |
-|---|---|
-| Where the awaiter finds its loop | Passed in, `Depend<Loop>` |
-| Lazy or eager | Lazy |
-| How a child resumes its parent | Returns to the parent's `await_suspend` if it finishes before stopping, symmetric transfer otherwise |
-| Inline or queued resumption | Inline, from dispatch |
-| Results and errors | `std::expected<T, lib::Status>` |
-| A full submission queue | Report `BUSY` without stopping |
-| Frames | The default allocator |
-| `std::execution::task` | Own `Task<T>`, no sender code |
-| Destroying a waiting task | Forbidden |
-| Multishot | Not supported yet |
-| Exceptions | Terminate |
+```cpp
+[[noreturn]] auto unhandled_exception() const noexcept -> void {
+  std::terminate();   // the same rule as a handler's escaping exception
+}
+```
