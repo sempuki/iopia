@@ -65,14 +65,14 @@ through `user_data`.
 
 | io_uring | Coroutine | iopia |
 |---|---|---|
-| Preparing a submission queue entry | `await_suspend` | `internal::Awaitable::await_suspend` takes an entry and prepares it. |
+| Preparing a submission queue entry (SQE) | `await_suspend` | `internal::Awaitable::await_suspend` takes an SQE and prepares it. |
 | `user_data` | The awaiter's address | Each awaiter is an `Operation`, and `user_data` points at it. |
 | Waiting for completions (`io_uring_enter`) | Code outside any coroutine | `run()` and `Loop::run_once()`. |
-| A completion queue entry | Resuming the coroutine | The `Operation`'s `complete` stores `res` and calls `resume()`. |
+| A completion queue entry (CQE) | Resuming the coroutine | The `Operation`'s `complete` stores `res` and calls `resume()`. |
 | `res` | `await_resume`'s value | Turned into `std::expected<T, lib::Status>`. |
 | The operation's lifetime | The awaiter's lifetime in the frame | Fixed address from `await_suspend` until `await_resume`. |
 | Multishot (several completions) | No direct match | Not supported yet. See below. |
-| Linked entries (`IOSQE_IO_LINK`) | No direct match | Not supported yet. |
+| Linked SQEs (`IOSQE_IO_LINK`) | No direct match | Not supported yet. |
 | Cancellation (`ASYNC_CANCEL`) | No direct match | Roadmap step 7. |
 
 ### One read, step by step
@@ -83,7 +83,7 @@ task                       loop                          kernel
 co_await Read{...}
   await_ready -> false
   await_suspend(handle)
-    maybe_submission(this) ── entry, user_data = &awaiter
+    maybe_submission(this) ── SQE, user_data = &awaiter
     io_uring_prep_read
     remember handle
     return true
@@ -111,7 +111,7 @@ Each section lists the options, what each trades, and what iopia does today.
 
 ### 1. Where the awaiter finds its loop
 
-`await_suspend` needs a loop to take an entry from.
+`await_suspend` needs a loop to take an SQE from.
 
 | Option | Trade |
 |---|---|
@@ -160,7 +160,7 @@ success costs nothing extra.
 ### 6. When the submission queue is full
 
 `Loop::maybe_submission` already submits what the queue holds and tries once
-more. If it still has no entry, the awaiter must do something.
+more. If it still has no SQE, the awaiter must do something.
 
 | Option | Trade |
 |---|---|

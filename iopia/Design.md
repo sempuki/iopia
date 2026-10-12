@@ -159,8 +159,9 @@ We keep the heap for the simpler move. Goal 3 argues for the value instead, so
 measure the hot calls before deciding to change it.
 
 **Completions leave the ring as copies.** No caller holds a pointer into the
-completion queue, so an entry can go back to the kernel before anyone handles
-it. `take_completions` copies a batch and returns all its entries with one
+completion queue, so a completion queue entry (CQE) can go back to the kernel
+before anyone handles it. `take_completions` copies a batch and returns all
+its CQEs with one
 `io_uring_cq_advance`. It reads the queue with `io_uring_for_each_cqe` and
 never enters the kernel.
 
@@ -202,7 +203,7 @@ can be neither copied nor moved, so it can't leave the address the kernel
 holds. Both front-ends build on this kind.
 
 **The loop owns it.** `loop.queue(prepare, handler)` takes a function that
-prepares the submission queue entry and a handler to call with each
+prepares the submission queue entry (SQE) and a handler to call with each
 completion. The loop stores the handler in a node of its own, a
 `HandlerNode` holding a `std::move_only_function<void(Completion) noexcept>`,
 and returns the node to a free list after the last completion. The caller has
@@ -225,9 +226,9 @@ enforces it. `complete` is a `noexcept` function pointer, `HandlerOperation`
 and `queue` accept only handlers the `Handler` concept allows, and `queue`
 accepts only prepare functions the `Preparer` concept allows
 (`std::is_nothrow_invocable_v<P, ::io_uring_sqe*>`). A prepare function runs
-after the loop has handed out the entry and counted the operation as pending,
-so a throw there would leave a half-prepared entry behind. A handler that fails reports it through its own
-state, such as an error it stores for its owner. If an exception escapes
+after the loop has handed out the SQE and counted the operation as pending,
+so a throw there would leave a half-prepared SQE behind. A handler that fails
+reports it through its own state, such as an error it stores for its owner. If an exception escapes
 anyway, the program terminates.
 
 The loop can therefore dispatch completions without ever stopping partway
@@ -238,14 +239,14 @@ first, so the handler can queue a new operation that reuses its node.
 ### Event loop
 
 `Loop` (`iopia/loop.hpp`) owns a `Ring` and counts the operations it has
-handed submission queue entries to whose last completion hasn't arrived. It
+handed SQEs to whose last completion hasn't arrived. It
 can be neither copied nor moved, because its loop-owned nodes and the
 operations that resubmit through it hold its address.
 
 Using.md lists its calls. Three of their behaviors are decisions.
 
 - **A full submission queue is submitted and retried once.** Most programs
-  never see a full queue, and a caller has one rule to follow: a null entry,
+  never see a full queue, and a caller has one rule to follow: a null SQE,
   or `false` from `queue`, means try again later.
 - **`run()` returns when nothing is pending or a handler calls `stop()`.** It
   retries a wait a signal interrupted (`-EINTR`), and returns any other error.
@@ -263,7 +264,7 @@ pending must therefore outlive the loop.
 
 **Completions are reaped in batches.** `run_once()` copies up to 32 ready
 completions into an array on its stack with `take_completions`, which returns
-their entries to the kernel with one store to the queue's head, then
+their CQEs to the kernel with one store to the queue's head, then
 dispatches the copies. It repeats while a batch comes back full.
 
 ```
@@ -290,13 +291,13 @@ concepts map onto C++ coroutines, and the choices behind this section.
 **An awaitable is the completion protocol's operation.** Each derives from
 `Operation` through `internal::Awaitable`, so it lives in the awaiting
 coroutine's frame, at a fixed address, for as long as the kernel holds it.
-`await_suspend` takes an entry from the loop and prepares it. The completion
+`await_suspend` takes an SQE from the loop and prepares it. The completion
 stores the result and resumes the coroutine, from inside the loop's dispatch.
 `await_resume` turns a negative result into a `lib::Status` through
 `raise_io_error`. A timeout that expires completes with `-ETIME`, which
 `Timeout` treats as success.
 
-If the loop can't hand out an entry, `await_suspend` returns `false`, the
+If the loop can't hand out an SQE, `await_suspend` returns `false`, the
 coroutine continues without suspending, and the awaitable reports `-EBUSY`
 as `IoError::BUSY`.
 
