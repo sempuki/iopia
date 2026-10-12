@@ -17,6 +17,7 @@ const std::array<lib::StatusConditionEntry, iopia::IO_ERROR_COUNT>
         lib::StatusConditionEntry{"kernel busy"},
         lib::StatusConditionEntry{"interrupted"},
         lib::StatusConditionEntry{"invalid argument"},
+        lib::StatusConditionEntry{"cancelled"},
         lib::StatusConditionEntry{"system error"},
 };
 
@@ -44,6 +45,8 @@ auto condition_of(int error) -> IoError {
     case EFAULT:
     case EBADF:
       return IoError::INVALID;
+    case ECANCELED:
+      return IoError::CANCELLED;
     default:
       return IoError::OTHER;
   }
