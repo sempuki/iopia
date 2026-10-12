@@ -66,15 +66,15 @@ class Loop final {
   explicit Loop(Ring ring) : ring_{std::move(ring)} {}
   ~Loop();
 
-  // The next free submission queue entry, with its user_data set to
+  // Takes the next free submission queue entry and sets its user_data to
   // `operation`. The caller prepares it with an io_uring_prep_* function. If
   // the queue is full, it submits what the queue holds and tries once more,
   // and returns null if that fails or the queue is still full.
-  auto maybe_submission(Depend<Operation> operation) -> ::io_uring_sqe* {
+  auto try_take_submission(Depend<Operation> operation) -> ::io_uring_sqe* {
     CHECK_PRECONDITION(operation->complete);
-    ::io_uring_sqe* submission = ring_.maybe_submission();
+    ::io_uring_sqe* submission = ring_.try_take_submission();
     if (!submission && ring_.submit()) [[unlikely]] {
-      submission = ring_.maybe_submission();
+      submission = ring_.try_take_submission();
     }
     if (submission) {
       ::io_uring_sqe_set_data(submission, operation.get());
@@ -91,7 +91,7 @@ class Loop final {
   [[nodiscard]] auto queue(PrepareType&& prepare, HandlerType&& handler)
       -> bool {
     internal::HandlerNode& node = acquire_node();
-    ::io_uring_sqe* submission = maybe_submission(Depend(node));
+    ::io_uring_sqe* submission = try_take_submission(Depend(node));
     if (!submission) {
       free_.push_back(&node);
       return false;

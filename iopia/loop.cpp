@@ -51,7 +51,7 @@ auto Loop::cancel_and_drain() -> void {
   if (pending_ == 0) {
     return;
   }
-  if (::io_uring_sqe* submission = maybe_submission(Depend(cancel_))) {
+  if (::io_uring_sqe* submission = try_take_submission(Depend(cancel_))) {
     ::io_uring_prep_cancel(submission, nullptr,
                            IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_ALL);
   }
