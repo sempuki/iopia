@@ -99,7 +99,7 @@ Each awaitable is one io_uring operation. Construct it in the `co_await`.
 An offset of -1 reads or writes at the file's current position. A buffer must
 stay valid until the `co_await` returns.
 
-If the loop has no submission queue entry to hand out, the awaitable doesn't
+If the loop has no submission queue entry (SQE) to hand out, the awaitable doesn't
 suspend, and it reports `IoError::BUSY`.
 
 ### Rules
@@ -127,8 +127,8 @@ Loop loop{*std::move(ring)};
 A handler is a `noexcept` callable that takes a `Completion`. It becomes an
 operation in one of two ways.
 
-**You own it.** Put a `HandlerOperation` wherever you like, take an entry for
-it, and prepare the entry with an `io_uring_prep_*` function. Keep the
+**You own it.** Put a `HandlerOperation` wherever you like, take an SQE for
+it, and prepare the SQE with an `io_uring_prep_*` function. Keep the
 operation alive until its last completion. It can't be moved.
 
 ```cpp
@@ -141,7 +141,7 @@ if (::io_uring_sqe* submission = loop.maybe_submission(Depend(operation))) {
 ```
 
 **The loop owns it.** `queue(prepare, handler)` takes a `noexcept` function
-that prepares the entry, and the handler. The loop keeps the handler until its
+that prepares the SQE, and the handler. The loop keeps the handler until its
 last completion.
 
 ```cpp
@@ -156,7 +156,7 @@ allocates once a capture is larger than 24 bytes. Design.md's Handlers section
 compares the two.
 
 When the submission queue is full, both submit what the queue holds and try
-once more. A null entry from `maybe_submission`, or `false` from `queue`,
+once more. A null SQE from `maybe_submission`, or `false` from `queue`,
 means that failed too, so try again after the loop has run.
 
 ### Running
@@ -209,9 +209,9 @@ struct CountingOperation final : Operation {
 
 | Call | What it does |
 |---|---|
-| `Ring::make(entries, flags)` | Sets up a ring with at least `entries` entries. `flags` are liburing's `IORING_SETUP_*` bits. |
-| `ring.maybe_submission()` | The next free entry, or null if the queue is full. |
-| `ring.submit()` | Hands every prepared entry to the kernel, and returns how many it took. |
+| `Ring::make(entries, flags)` | Sets up a ring with room for at least `entries` SQEs. `flags` are liburing's `IORING_SETUP_*` bits. |
+| `ring.maybe_submission()` | The next free SQE, or null if the queue is full. |
+| `ring.submit()` | Hands every prepared SQE to the kernel, and returns how many it took. |
 | `ring.submit_and_wait(count)` | Submits, then waits until at least `count` completions are ready, in one system call. |
 | `ring.wait()` | Waits for the next completion and returns a copy of it. |
 | `ring.maybe_completion()` | A copy of the next ready completion, or none. Never waits. |
