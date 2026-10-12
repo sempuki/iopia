@@ -182,7 +182,7 @@ auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));
 | Register the callback | `co_await` calls `await_suspend(handle)`, which keeps the handle and puts `&Read` in `user_data` |
 | Begin the work | The loop submits the SQE that `await_suspend` prepared |
 | Call back | The loop calls `handle.resume()` |
-| Deliver the result | `await_resume()` returns it |
+| Deliver the result | The completion stores `cqe->res` in the awaiter's `result_`. On resuming, `Read::await_resume()` turns it into a `std::expected<std::uint32_t, lib::Status>`, the bytes read or a `raise_io_error` status, which becomes the value of the `co_await` expression |
 | Cancel | Not yet; roadmap step 7 |
 | Where code runs | The thread running the loop |
 | Drive it from ordinary code | `run(InOut(loop), task)` |
