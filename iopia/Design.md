@@ -296,25 +296,82 @@ cancel the operation first, a task that is suspended must be run to the end.
 The coroutine front-end uses only `<coroutine>`, so a program that uses it
 compiles no sender code.
 
+### Requests
+
+Both front-ends issue the same io_uring requests, so each request is written
+once, in `iopia/request.hpp`. A request knows how to prepare its SQE and how
+to turn its CQE's `res` into a `std::expected` value.
+
+```
+                 NoOpRequest  ReadRequest  WriteRequest  TimeoutRequest
+                   prepare(sqe)            result(res)
+                  /                                    \
+ internal::Awaitable<Request>                 RequestSender<Request>
+ (NoOp, Read, Write, Timeout)                 (NoOpSender, ReadSender, ...)
+```
+
+A request is stored by value in the awaiter or the operation state, which sit
+at a fixed address while the kernel holds them. `TimeoutRequest` relies on
+that: the kernel reads its timespec when the SQE is submitted, after
+`prepare` returns.
+
 ### Sender front-end
 
 The sender front-end is iopia's own implementation of C++26's
-`std::execution` design. iopia defines its own `scheduler`, `sender`,
-`receiver` and `operation_state` concepts in the `iopia` namespace, after the
-standard's. A loop's scheduler has a `schedule()` that returns a sender, and
-each io_uring operation is a sender too. The operation state that `connect`
-returns is the completion protocol's operation, so it lives exactly as long
-as the submission does.
+`std::execution` design, in `iopia/sender.hpp` and
+`iopia/request_sender.hpp`. Using.md shows how to use it.
 
-iopia writes the algorithms it needs (`then`, `when_all`, `let_value`,
-`sync_wait` and so on) one at a time, as the roadmap reaches them.
-Completions map onto the three channels as follows.
+**The concepts follow the standard's names and shapes, simplified.**
+
+| iopia | The standard | What iopia leaves out |
+|---|---|---|
+| `Sender`: has a `value_type` | `sender`, with completion signatures | Several value types, and per-sender error types |
+| `Receiver<R, T>`: `set_value(T)`, `set_error(lib::Status)`, `set_stopped()`, all `noexcept`, on an rvalue | `receiver_of` | Environments (`get_env`), until cancellation needs stop tokens |
+| `OperationState`: `start()`, `noexcept` | `operation_state` | |
+| `SenderTo<S, R>`: `std::move(sender).connect(receiver)` returns an operation state | `sender_to` | |
+| `Scheduler`: `schedule()` returns a sender of `void`; equality-comparable | `scheduler` | Forward-progress and completion-scheduler queries |
+
+`connect`, `start`, `schedule` and the three completions are member
+functions, as in the standard since P2855. A sender's single `value_type`,
+possibly `void`, stands in for completion signatures, and every error is a
+`lib::Status`, as everywhere else in iopia. The three completions are
+`noexcept`, as handlers are.
+
+**A request sender's operation state is the completion protocol's
+operation.** `internal::RequestOperation` derives from `Operation`, so
+`user_data` points at it, and it can be neither copied nor moved. `connect`
+returns it as a prvalue, which C++17's guaranteed copy elision constructs in
+place. `start()` takes an SQE and prepares the request.
 
 | Completion | Channel |
 |---|---|
-| `res >= 0` | `set_value` with the result |
-| `res == -ECANCELED` after a stop request | `set_stopped` |
-| any other `res < 0` | `set_error` with the `lib::Status` |
+| `res == -ECANCELED` | `set_stopped` |
+| the request's `result(res)` holds a value | `set_value` with the value |
+| the request's `result(res)` holds an error | `set_error` with the `lib::Status` |
+| no SQE was free | `set_error` with `IoError::BUSY`, from inside `start()` |
+
+**Algorithms nest without allocating.** `then` connects its inner sender to a
+receiver that calls the function, so the operation state of
+`read | then(f)` is the read's own operation state, holding the function and
+the outer receiver inside its receiver.
+
+```
+sync_wait(loop, ReadSender{...} | then(f))
+  connect: RequestOperation<ReadRequest, ThenReceiver<F, SyncWaitReceiver>>
+  start:   take an SQE, prepare the read
+  CQE:     ThenReceiver::set_value(bytes) -> f(bytes) -> SyncWaitReceiver
+```
+
+**`sync_wait(InOut(loop), sender)` drives the loop,** the way `run()` does
+for a task: it connects and starts the sender, then calls `run_once()` until
+the receiver has a result. It returns a flat `std::expected<T, lib::Status>`;
+a stopped sender comes back as `IoError::CANCELLED`. The operation state lives
+on `sync_wait`'s stack, so the same rule as for a task applies: if waiting
+fails, the kernel may still hold its address.
+
+**`LoopScheduler`** schedules onto a loop. Its `schedule()` returns a
+`NoOpSender`, whose completion runs from the loop's dispatch on the loop's
+thread.
 
 ### Threading
 
@@ -390,6 +447,9 @@ network protocol between gateways.
 | The loop reaps completions in batches of 32, copied out before dispatch. | One store to the shared head per batch instead of per completion, and the slots are free again before handlers run. |
 | A full submission queue is submitted and retried once; null means it still failed. | Most programs never see a full queue, and callers keep one simple contract: null means try later. |
 | `run()` returns when nothing is pending or a handler calls `stop()`. | It is what `sync_wait` and a coroutine's top-level run will need, without a timeout API yet. |
+| Each io_uring request is written once, in `request.hpp`, and both front-ends build on it. | Goal 2: neither front-end is a port of the other. |
+| A sender has one `value_type`, every error is a `lib::Status`, and the three completions are `noexcept`. | The standard's completion signatures teach less than they cost here, and the rest of iopia already reports errors as `lib::Status` and forbids throwing completions. |
+| A request sender's `-ECANCELED` completes with `set_stopped`, and `sync_wait` reports it as `IoError::CANCELLED`. | Cancellation is the stopped channel's purpose; the loop's destructor already cancels what is pending. |
 | `Task<T>` is iopia's own coroutine type and doesn't await senders. | Coroutine users compile no sender code, per "you pay only for what you use". This settles whether to follow `std::execution::task`; step 6 bridges the two front-ends. |
 | A child task that finishes before suspending returns to its parent's `await_suspend`. | Symmetric transfer isn't a tail call under GCC at `-O0`, and a loop over such children would overflow the stack. |
 | Handlers and prepare functions are `noexcept`, checked at compile time. | The loop never has to recover from a dispatch that stopped partway, which keeps batched reaping simple. We may revisit this later. |
