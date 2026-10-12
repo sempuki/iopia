@@ -91,6 +91,101 @@ read(fd, buf, [&](int n) {         int n = co_await Read{...};
 SQE and CQE are the submission and completion queue entries, one per request
 and one per result.
 
+### The same read, four ways
+
+Each example reads `size` bytes from `file` at offset 0 into `buffer`, which
+is a pointer, or a `std::span` for iopia's `Read`. The tags in the comments
+name the rows of the table above.
+
+**io_uring**, through liburing.
+
+```cpp
+::io_uring ring;
+::io_uring_queue_init(64, &ring, 0);
+
+::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring);
+::io_uring_prep_read(sqe, file, buffer, size, 0);    // [describe]
+::io_uring_sqe_set_data64(sqe, 42);                  // [register] a tag
+::io_uring_submit(&ring);                            // [begin]
+
+::io_uring_cqe* cqe = nullptr;
+::io_uring_wait_cqe(&ring, &cqe);                    // [drive]
+if (cqe->user_data == 42) {                          // [call back] by dispatching on the tag
+  std::int32_t bytes = cqe->res;                     // [deliver]
+}
+::io_uring_cqe_seen(&ring, cqe);
+```
+
+**Callback style**, through iopia's `Loop::queue`.
+
+```cpp
+std::int32_t bytes = 0;
+Loop loop{*Ring::make(64)};
+
+bool queued = loop.queue(
+    [&](::io_uring_sqe* submission) noexcept {       // [describe]
+      ::io_uring_prep_read(submission, file, buffer, size, 0);
+    },
+    [&](Completion completion) noexcept {             // [register] this lambda
+      bytes = completion.result;                      // [call back], [deliver]
+    });
+auto ran = loop.run();                                // [begin] and [drive]
+```
+
+**Coroutine**, through iopia's `Task` and `Read`.
+
+```cpp
+auto read_file(Depend<Loop> loop, std::int32_t file,
+               std::span<std::byte> buffer)
+    -> Task<std::expected<std::uint32_t, lib::Status>> {
+  co_return co_await Read{loop, file, buffer, 0};
+  //        ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  //        |        [describe]
+  //        await_suspend: [register] the handle and [begin]
+  //        resume(): [call back]; await_resume(): [deliver]
+}
+
+Loop loop{*Ring::make(64)};
+auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));  // [drive]
+```
+
+**`std::execution`**. `read_sender` stands for a sender that reads with
+io_uring; iopia's arrives in roadmap step 5.
+
+```cpp
+namespace ex = std::execution;
+
+// With algorithms.
+auto work = read_sender(scheduler, file, buffer, 0)  // [describe]
+          | ex::then([](std::uint32_t bytes) {       // what runs on [call back]
+              return bytes;
+            });
+auto [bytes] = *ex::sync_wait(std::move(work));      // [register], [begin], [drive]
+
+// Spelled out.
+struct Receiver {
+  using receiver_concept = ex::receiver_t;
+  std::uint32_t* bytes = nullptr;
+
+  auto set_value(std::uint32_t count) && noexcept -> void {   // [call back]
+    *bytes = count;                                           // [deliver]
+  }
+  auto set_error(std::error_code) && noexcept -> void {}
+  auto set_stopped() && noexcept -> void {}
+};
+
+std::uint32_t bytes = 0;
+auto sender = read_sender(scheduler, file, buffer, 0);           // [describe]
+auto state = ex::connect(std::move(sender), Receiver{&bytes});   // [register]
+ex::start(state);                                                // [begin]
+// The scheduler's run loop must now [drive] until set_value runs.
+```
+
+The four differ in who writes the callback. io_uring leaves dispatch on
+`user_data` to the program, the callback style takes a lambda, the coroutine
+gets its callback from the compiler, and `std::execution` takes a receiver,
+which `sync_wait` writes for you.
+
 ### Which piece plays which role
 
 | Coroutine piece | Scope | `std::execution` role |
