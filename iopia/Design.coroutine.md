@@ -342,7 +342,7 @@ auto child(Depend<Loop> loop, std::int32_t file,      // C1: calling it
   co_return static_cast<std::int32_t>(*read);          // C5
 }                                                      // C6 splits the body at the co_await
 
-auto parent(Depend<Loop> loop) -> Task<std::int32_t> {
+auto parent(Depend<Loop> loop, std::int32_t file) -> Task<std::int32_t> {
   std::array<std::byte, 64> buffer;
   Task<std::int32_t> task = child(loop, file, buffer); // C1
   std::int32_t bytes = co_await std::move(task);       // C3, through Task's operator co_await
