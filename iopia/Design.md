@@ -56,65 +56,27 @@ library's front-ends are done (roadmap step 8).
 
 ## Conventions
 
-iopia follows the conventions in simon's
-[framework/Design.md](https://github.com/sempuki/simon/blob/main/framework/Design.md#conventions):
-`Out`, `InOut` and `Depend` at call sites, trailing return types, `maybe_` for
-nullable getters, one `public:`, `protected:` and `private:` section per class,
-and the rest.
+iopia follows the conventions every project that uses lib shares, in lib's
+[Conventions.md](https://github.com/sempuki/lib/blob/main/Conventions.md)
+(`2nd_party/lib/Conventions.md` in a checkout). These rules are iopia's own.
 
-**Documents live beside their code.** A package's `Design.md`, any
-`Design.<topic>.md`, and its `Using.md` sit in the package's directory.
-
-**Code lives in the `iopia` package and the `iopia` namespace.** Headers are
-included from the repository root (`#include "iopia/ring.hpp"`), and
-implementation details live in `iopia::internal`. The gateway lives in the
+**Code lives in the `iopia` package and the `iopia` namespace,** with
+implementation details in `iopia::internal`. The gateway lives in the
 `gateway` package and the `iopia::gateway` namespace, so the library never
-depends on iceoryx2.
+depends on iceoryx2. `iopia/argument.hpp` declares `Out`, `InOut` and
+`Depend` in `iopia`.
 
-**C symbols are written with the global namespace qualifier,**
-`::io_uring_get_sqe(...)` and `::io_uring_sqe*`, so a reader can tell
-liburing's C API from iopia's own names. Macros such as `IORING_SETUP_SQPOLL`
-and `EINVAL` can't be qualified and stay as they are. A function-like macro,
-such as `io_uring_for_each_cqe`, gets a comment saying it's a macro, so the
-missing `::` doesn't look like a mistake.
+**liburing's names keep their abbreviations.** `IoError` keeps "io", because it
+follows io_uring's naming, and liburing's own names such as
+`io_uring_prep_nop` and `io_uring_for_each_cqe` stay as they are. liburing's
+`unsigned` parameters take a `std::uint32_t` without a cast, since the two are
+the same type on Linux.
 
-**`Out`, `InOut` and `Depend` are written without `lib::`.** They are lib's
-parameter vocabulary, and the project has only one of each.
-`iopia/argument.hpp` declares them in the `iopia` namespace, as simon's
-`core/argument.hpp` does.
-
-**Integers have fixed widths.** iopia writes `std::uint32_t` where C would
-write `unsigned`. Sizes and
-indices into containers stay `std::size_t`. liburing's `unsigned` parameters
-take a `std::uint32_t` without a cast, since the two are the same type on
-Linux. A value a C call returns, such as liburing's `int` results, keeps its
-type only until iopia converts it.
-
-**A function that acts and may fail is named `try_*`.** A verb says the
-function does work, and `try_` says it can come back empty-handed:
-`try_take_submission` claims a free SQE and returns null when none is free.
-simon's `maybe_*` stays for getters that may return null.
-
-**Names avoid abbreviations,** except where they come from the C API:
-`submission`, not `sqe`. `IoError` keeps "io", because it follows io_uring's
-naming.
-
-**Errors are `std::expected<T, lib::Status>`.** liburing reports failure as a
-negative `errno`. iopia maps it to a status domain, an `enum class` with its
-messages in a `lib::EnumStatusKindConditionMixin` specialization, as simon's
-`format/format_error.hpp` does. The value a completion carries (`cqe->res`) is
-a result of the operation, so a front-end passes it on as the operation's
+**liburing's errors form the `IoError` domain** (`iopia/io_error.hpp`). A
+liburing call that fails returns a negative `errno`, and `raise_io_error`
+maps it to a condition. The value a completion carries (`cqe->res`) is a
+result of the operation, so a front-end passes it on as the operation's
 outcome.
-
-**Types that can fail to construct have a factory.** A constructor can't return
-an error, so `Ring::make(...)` returns `std::expected<Ring, lib::Status>`.
-
-**Contract checks use lib's `CHECK_PRECONDITION`, `CHECK_POSTCONDITION`,
-`CHECK_INVARIANT` and `CHECK_UNREACHABLE`.**
-
-**Tests are Catch2, through `@lib//base:testing`.** One `TEST_CASE` per type,
-`SECTION("ShouldXGivenY")` inside it, and each section split into
-`// Preconditions.`, `// Under Test.` and `// Postconditions.`
 
 ## Architecture
 
