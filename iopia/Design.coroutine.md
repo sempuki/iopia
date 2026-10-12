@@ -71,22 +71,25 @@ the coroutine's handle is that callback.
 
 ```
 callback style                     coroutine style
+(a hypothetical async_read)
 ──────────────                     ───────────────
-read(fd, buf, [&](int n) {         int n = co_await Read{...};
+async_read(fd, buf, [&](int n) {   int n = co_await Read{...};
   ...rest...                       ...rest...
 });
 ```
 
-| Idea | io_uring | Callback style | Coroutine | `std::execution` |
+Each column follows its example in [the same read, four ways](#the-same-read-four-ways).
+
+| Idea | io_uring | Callback style (`Loop::queue`) | Coroutine (`Task`, `Read`) | `std::execution` |
 |---|---|---|---|---|
-| Describe the work | Prepare an SQE | The arguments to `read(...)` | The awaitable, such as `Read{...}` | A **sender** |
-| Register the callback | `user_data` | Pass the lambda | `await_suspend(handle)` | `connect(sender, receiver)`, which makes an **operation state** |
-| Begin the work | Submit | The call | Inside `await_suspend` | `start(operation_state)` |
-| Call back | A CQE arrives | Call the lambda | `handle.resume()` | `set_value`, `set_error` or `set_stopped` on the **receiver** |
-| Deliver the result | `res` | The lambda's argument | `await_resume()` | The arguments to `set_value` or `set_error` |
-| Cancel | `IORING_OP_ASYNC_CANCEL` | Library-specific | Library-specific | A **stop token**, and `set_stopped` |
-| Where code runs | The thread that reaps the CQ | Wherever the lambda is called | Wherever `resume()` is called | A **scheduler** |
-| Drive it from ordinary code | `io_uring_enter` in a loop | The library's event loop | A run function, such as iopia's `run` | `sync_wait` |
+| Describe the work | `io_uring_prep_read(sqe, ...)` fills an SQE | The prepare lambda, which calls `io_uring_prep_read` | `Read{loop, file, buffer, 0}` | A **sender**, `read_sender(...)` |
+| Register the callback | `io_uring_sqe_set_data64(sqe, 42)` tags the SQE | The handler lambda given to `loop.queue` | `co_await` calls `await_suspend(handle)`, which keeps the handle and puts `&Read` in `user_data` | `connect(sender, receiver)`, which makes an **operation state** |
+| Begin the work | `io_uring_submit` | `loop.run()` submits the SQE | The loop submits the SQE that `await_suspend` prepared | `start(operation_state)` |
+| Call back | The program reads a CQE and dispatches on its `user_data` | The loop calls the handler | The loop calls `handle.resume()` | `set_value`, `set_error` or `set_stopped` on the **receiver** |
+| Deliver the result | `cqe->res` | `completion.result` | `await_resume()` returns it | The arguments to `set_value` or `set_error` |
+| Cancel | `IORING_OP_ASYNC_CANCEL` | Not yet; roadmap step 7 | Not yet; roadmap step 7 | A **stop token**, and `set_stopped` |
+| Where code runs | The thread that reaps the CQ | The thread running the loop | The thread running the loop | A **scheduler** |
+| Drive it from ordinary code | `io_uring_wait_cqe` | `loop.run()` | `run(InOut(loop), task)` | `sync_wait`, or the scheduler's run loop |
 
 SQE and CQE are the submission and completion queue entries, one per request
 and one per result.
@@ -141,12 +144,13 @@ auto read_file(Depend<Loop> loop, std::int32_t file,
   co_return co_await Read{loop, file, buffer, 0};
   //        ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   //        |        [describe]
-  //        await_suspend: [register] the handle and [begin]
+  //        await_suspend: [register] the handle, and prepare the SQE
   //        resume(): [call back]; await_resume(): [deliver]
 }
 
 Loop loop{*Ring::make(64)};
-auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));  // [drive]
+auto bytes = run(InOut(loop), read_file(Depend(loop), file, buffer));
+// [begin] and [drive]: run()'s loop submits the SQE and waits for its CQE
 ```
 
 **`std::execution`**. `read_sender` stands for a sender that reads with
